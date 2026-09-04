@@ -8,7 +8,7 @@ compatibility_date = "2025-02-24"
 [vars]
 # UUID = "d342d11e-d424-4583-b36e-524ab1f0afa4"
 # PROXYIP = "1.2.3.4"
-PROXYIP = "proxyip.cmliussss.net"
+PROXYIP = "ProxyIP.SG.CMLiussss.net"
 # DNS_RESOLVER_URL = "https://cloudflare-dns.com/dns-query"
 DNS_RESOLVER_URL = "https://cloudflare-dns.com/dns-query"
 # NODE_ID = "1"
