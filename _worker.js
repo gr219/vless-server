@@ -699,7 +699,7 @@ const ed = 'RUR0dW5uZWw=';
  * @returns {string}
  */
 function getVlessConfig(userIDs, hostName) {
-	const commonUrlPart = `:443?encryption=none&security=tls&sni=${hostName}&fp=randomized&type=ws&host=${hostName}&path=%2F%3Fed%3D2048#${hostName}`;
+	const commonUrlPart = `:443?encryption=none&security=tls&sni=${hostName}&fp=chrome&type=ws&host=${hostName}&path=%2F%3Fed%3D2048#${hostName}`;
 	const hashSeparator = "################################################################";
 
 	// Split the userIDs into an array
@@ -834,8 +834,8 @@ const httpsPortSet = new Set([443, 8443, 2053, 2096, 2087, 2083]);
 
 function createVlessSub(userIDPath, hostName) {
 	const userIDArray = userIDPath.includes(',') ? userIDPath.split(',') : [userIDPath];
-	const commonUrlPartHttp = `?encryption=none&security=none&fp=random&type=ws&host=${hostName}&path=%2F%3Fed%3D2048#`;
-	const commonUrlPartHttps = `?encryption=none&security=tls&sni=${hostName}&fp=random&type=ws&host=${hostName}&path=%2F%3Fed%3D2048#`;
+	const commonUrlPartHttp = `?encryption=none&security=none&fp=chrome&type=ws&host=${hostName}&path=%2F%3Fed%3D2048#`;
+	const commonUrlPartHttps = `?encryption=none&security=tls&sni=${hostName}&fp=chrome&type=ws&host=${hostName}&path=%2F%3Fed%3D2048#`;
 
 	const output = userIDArray.flatMap((userID) => {
 		const httpConfigs = Array.from(httpPortSet).flatMap((port) => {
