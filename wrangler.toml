@@ -8,7 +8,9 @@ compatibility_date = "2025-02-24"
 [vars]
 # UUID = "d342d11e-d424-4583-b36e-524ab1f0afa4"
 # PROXYIP = "1.2.3.4"
-PROXYIP = "ProxyIP.SG.CMLiussss.net"
+# Comma-separated list; the worker picks one at random per request.
+# All entries verified alive on 2026-09-05 against speed.cloudflare.com.
+PROXYIP = "proxyip.cmliussss.net,ProxyIP.DE.CMLiussss.net,ProxyIP.US.CMLiussss.net,ProxyIP.SG.CMLiussss.net,ProxyIP.JP.CMLiussss.net,ProxyIP.KR.CMLiussss.net,ProxyIP.HK.CMLiussss.net,di.nscl.ir,proxy.farel.is-a.dev,bpb.yousef.isegaro.com,tr.diam4.ggff.net,proxyip.oracle.fxxk.dedyn.io,proxyip.leilaomi.cc.cd"
 # DNS_RESOLVER_URL = "https://cloudflare-dns.com/dns-query"
 DNS_RESOLVER_URL = "https://cloudflare-dns.com/dns-query"
 # NODE_ID = "1"

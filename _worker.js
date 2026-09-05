@@ -5,14 +5,58 @@ import { connect } from 'cloudflare:sockets';
 // [Windows] Press "Win + R", input cmd and run:  Powershell -NoExit -Command "[guid]::NewGuid()"
 let userID = 'd342d11e-d424-4583-b36e-524ab1f0afa4';
 
-const proxyIPs = ['cdn.xn--b6gac.eu.org', 'cdn-all.xn--b6gac.eu.org', 'workers.cloudflare.cyou'];
+// Rotating proxyIP endpoints. Each hostname resolves to a large, continuously
+// refreshed pool of working proxy IPs, so they stay healthy without code changes.
+// Source: https://github.com/NiREvil/vless/blob/main/sub/ProxyIP.md
+// Last verified alive: 2026-09-05 (TLS+HTTP probe against speed.cloudflare.com).
+let proxyIPs = [
+	'proxyip.cmliussss.net',            // worldwide
+	'ProxyIP.DE.CMLiussss.net',         // Germany
+	'ProxyIP.US.CMLiussss.net',         // United States
+	'ProxyIP.SG.CMLiussss.net',         // Singapore
+	'ProxyIP.JP.CMLiussss.net',         // Japan
+	'ProxyIP.KR.CMLiussss.net',         // South Korea
+	'ProxyIP.HK.CMLiussss.net',         // Hong Kong
+	'di.nscl.ir',                       // US / Google / Amazon / Hetzner
+	'proxy.farel.is-a.dev',             // mixed
+	'bpb.yousef.isegaro.com',           // BPB LTD
+	'tr.diam4.ggff.net',                // Turkey
+	'proxyip.oracle.fxxk.dedyn.io',     // Oracle Cloud
+	'proxyip.leilaomi.cc.cd',           // mixed
+];
+
+// Verified-alive static fallbacks (2026-09-05) if the hostnames above ever go dark.
+// Two lowest-risk IPs per region from https://github.com/NiREvil/vless/blob/main/sub/ProxyIP-Daily.md
+// NL 103.102.228.10, 103.102.228.113   | DE 103.228.168.182, 103.228.168.80
+// US 103.3.26.26, 117.55.228.179       | FR 109.61.110.151, 147.90.14.132
+// GB 138.249.138.5, 140.235.74.26      | FI 109.107.171.147, 109.120.185.29
+// CH 132.243.174.185, 176.10.125.114   | SE 130.49.190.27, 158.179.206.143
+// JP 103.201.131.215, 103.245.235.254  | SG 124.156.202.172, 139.180.159.133
+// KR 130.94.29.155, 20.41.123.20       | HK 103.101.0.73, 103.118.40.94
+// CA 172.98.207.58, 45.133.16.41       | AU 125.7.24.251, 137.23.29.90
+// IN 20.235.105.146, 20.235.220.189    | TR 138.124.107.35, 141.98.118.80
+// PL 138.124.104.104, 139.28.97.231    | LV 151.242.43.135, 151.242.43.187
 
 // if you want to use ipv6 or single proxyIP, please add comment at this line and remove comment at the next line
 let proxyIP = proxyIPs[Math.floor(Math.random() * proxyIPs.length)];
 // use single proxyIP instead of random
-// let proxyIP = 'cdn.xn--b6gac.eu.org';
+// let proxyIP = 'proxyip.cmliussss.net';
 // ipv6 proxyIP example remove comment to use
 // let proxyIP = "[2a01:4f8:c2c:123f:64:5:6810:c55a]"
+
+/**
+ * Parses the PROXYIP environment variable, which may hold a single host or a
+ * comma-separated list, and returns a trimmed, non-empty list of hosts.
+ * @param {string | undefined} rawProxyIP
+ * @returns {string[]} the configured proxy hosts, or an empty array if unset
+ */
+// Maximum number of proxy hosts included in a generated subscription.
+const SUB_PROXY_IP_LIMIT = 4;
+
+function parseProxyIPs(rawProxyIP) {
+	if (!rawProxyIP) return [];
+	return rawProxyIP.split(',').map((host) => host.trim()).filter((host) => host.length > 0);
+}
 
 let dohURL = 'https://freedns.controld.com/p0'; // https://github.com/serverless-dns/serverless-dns OR xxx.xxx.workers.dev [README.md]
 
@@ -31,15 +75,21 @@ export default {
 		// uuid_validator(request);
 		try {
 			userID = env.UUID || userID;
-			proxyIP = env.PROXYIP || proxyIP;
-			dohURL = env.DNS_RESOLVER_URL || dohURL;
-			let userID_Path = userID;
-			if (userID.includes(',')) {
-				userID_Path = userID.split(',')[0];
+			const envProxyIPs = parseProxyIPs(env.PROXYIP);
+			if (envProxyIPs.length > 0) {
+				proxyIPs = envProxyIPs;
 			}
+			proxyIP = proxyIPs[Math.floor(Math.random() * proxyIPs.length)];
+			dohURL = env.DNS_RESOLVER_URL || dohURL;
+			const userIDs = userID.split(',').map((id) => id.trim()).filter((id) => id.length > 0);
 			const upgradeHeader = request.headers.get('Upgrade');
 			if (!upgradeHeader || upgradeHeader !== 'websocket') {
 				const url = new URL(request.url);
+				// Every configured UUID gets its own set of routes, not just the first one.
+				const requestedUserID = userIDs.find((id) => url.pathname === `/${id}`
+					|| url.pathname === `/sub/${id}`
+					|| url.pathname === `/bestip/${id}`);
+				const userID_Path = requestedUserID || userIDs[0];
 				switch (url.pathname) {
 					case `/cf`: {
 						return new Response(JSON.stringify(request.cf, null, 4), {
@@ -50,7 +100,7 @@ export default {
 						});
 					}
 					case `/${userID_Path}`: {
-						const vlessConfig = getVlessConfig(userID, request.headers.get('Host'));
+						const vlessConfig = getVlessConfig(userID, request.headers.get('Host'), userID_Path);
 						return new Response(`${vlessConfig}`, {
 							status: 200,
 							headers: {
@@ -72,7 +122,7 @@ export default {
 					};
 					case `/bestip/${userID_Path}`: {
 						const headers = request.headers;
-						const url = `https://sub.xf.free.hr/auto?host=${request.headers.get('Host')}&uuid=${userID}&path=/`;
+						const url = `https://sub.xf.free.hr/auto?host=${request.headers.get('Host')}&uuid=${userID_Path}&path=/`;
 						const bestSubConfig = await fetch(url, { headers: headers });
 						return bestSubConfig;
 					};
@@ -698,12 +748,14 @@ const ed = 'RUR0dW5uZWw=';
  * @param {string | null} hostName
  * @returns {string}
  */
-function getVlessConfig(userIDs, hostName) {
+function getVlessConfig(userIDs, hostName, activeUserID) {
 	const commonUrlPart = `:443?encryption=none&security=tls&sni=${hostName}&fp=chrome&type=ws&host=${hostName}&path=%2F%3Fed%3D2048#${hostName}`;
 	const hashSeparator = "################################################################";
 
 	// Split the userIDs into an array
-	const userIDArray = userIDs.split(",");
+	const userIDArray = userIDs.split(",").map((id) => id.trim()).filter((id) => id.length > 0);
+	// Links on the page belong to the UUID the page was requested with.
+	const linkUserID = activeUserID && userIDArray.includes(activeUserID) ? activeUserID : userIDArray[0];
 
 	// Prepare output string for each userID
 	const output = userIDArray.map((userID) => {
@@ -720,8 +772,8 @@ ${vlessSec}
 <button onclick='copyToClipboard("${vlessSec}")'><i class="fa fa-clipboard"></i> Copy vlessSec</button>
 ---------------------------------------------------------------`;
 	}).join('\n');
-	const sublink = `https://${hostName}/sub/${userIDArray[0]}?format=clash`
-	const subbestip = `https://${hostName}/bestip/${userIDArray[0]}`;
+	const sublink = `https://${hostName}/sub/${linkUserID}?format=clash`
+	const subbestip = `https://${hostName}/bestip/${linkUserID}`;
 	const clash_link = `https://api.v1.mk/sub?target=clash&url=${encodeURIComponent(sublink)}&insert=false&emoji=true&list=false&tfo=false&scv=true&fdn=false&sort=false&new_name=true`;
 	// Prepare header string
 	const header = `
@@ -729,8 +781,8 @@ ${vlessSec}
 <b style='font-size: 15px;'>Welcome! This page generates configurations for the VLESS protocol. If you find it useful, please check out our GitHub project and give it a star:</b>
 <a href='https://github.com/3Kmfi6HP/EDtunnel' target='_blank'>EDtunnel - https://github.com/3Kmfi6HP/EDtunnel</a>
 <iframe src='https://ghbtns.com/github-btn.html?user=USERNAME&repo=REPOSITORY&type=star&count=true&size=large' frameborder='0' scrolling='0' width='170' height='30' title='GitHub'></iframe>
-<a href='//${hostName}/sub/${userIDArray[0]}' target='_blank'>VLESS node subscription link</a>
-<a href='clash://install-config?url=${encodeURIComponent(`https://${hostName}/sub/${userIDArray[0]}?format=clash`)}}' target='_blank'>Clash for Windows subscription link</a>
+<a href='//${hostName}/sub/${linkUserID}' target='_blank'>VLESS node subscription link</a>
+<a href='clash://install-config?url=${encodeURIComponent(`https://${hostName}/sub/${linkUserID}?format=clash`)}}' target='_blank'>Clash for Windows subscription link</a>
 <a href='${clash_link}' target='_blank'>Clash subscription link</a>
 <a href='${subbestip}' target='_blank'>Auto best-IP subscription</a>
 <a href='clash://install-config?url=${encodeURIComponent(subbestip)}' target='_blank'>Clash auto best-IP</a>
@@ -750,7 +802,7 @@ ${vlessSec}
 	<meta property='og:title' content='EDtunnel - VLESS configuration and subscribe output' />
 	<meta property='og:description' content='Use cloudflare pages and worker severless to implement VLESS protocol' />
 	<meta property='og:url' content='https://${hostName}/' />
-	<meta property='og:image' content='https://api.qrserver.com/v1/create-qr-code/?size=500x500&data=${encodeURIComponent(`vless://${userIDs.split(",")[0]}@${hostName}${commonUrlPart}`)}' />
+	<meta property='og:image' content='https://api.qrserver.com/v1/create-qr-code/?size=500x500&data=${encodeURIComponent(`vless://${linkUserID}@${hostName}${commonUrlPart}`)}' />
 	<meta name='twitter:card' content='summary_large_image' />
 	<meta name='twitter:title' content='EDtunnel - VLESS configuration and subscribe output' />
 	<meta name='twitter:description' content='Use cloudflare pages and worker severless to implement VLESS protocol' />
@@ -834,6 +886,9 @@ const httpsPortSet = new Set([443, 8443, 2053, 2096, 2087, 2083]);
 
 function createVlessSub(userIDPath, hostName) {
 	const userIDArray = userIDPath.includes(',') ? userIDPath.split(',') : [userIDPath];
+	// One node is emitted per userID x port x proxyIP, so cap the proxy hosts used
+	// here to keep the subscription small enough for clients to import comfortably.
+	const subProxyIPs = proxyIPs.slice(0, SUB_PROXY_IP_LIMIT);
 	const commonUrlPartHttp = `?encryption=none&security=none&fp=chrome&type=ws&host=${hostName}&path=%2F%3Fed%3D2048#`;
 	const commonUrlPartHttps = `?encryption=none&security=tls&sni=${hostName}&fp=chrome&type=ws&host=${hostName}&path=%2F%3Fed%3D2048#`;
 
@@ -842,7 +897,7 @@ function createVlessSub(userIDPath, hostName) {
 			if (!hostName.includes('pages.dev')) {
 				const urlPart = `${hostName}-HTTP-${port}`;
 				const vlessMainHttp = atob(pt) + '://' + userID + atob(at) + hostName + ':' + port + commonUrlPartHttp + urlPart;
-				return proxyIPs.flatMap((proxyIP) => {
+				return subProxyIPs.flatMap((proxyIP) => {
 					const vlessSecHttp = atob(pt) + '://' + userID + atob(at) + proxyIP + ':' + port + commonUrlPartHttp + urlPart + '-' + proxyIP + '-' + atob(ed);
 					return [vlessMainHttp, vlessSecHttp];
 				});
@@ -853,7 +908,7 @@ function createVlessSub(userIDPath, hostName) {
 		const httpsConfigs = Array.from(httpsPortSet).flatMap((port) => {
 			const urlPart = `${hostName}-HTTPS-${port}`;
 			const vlessMainHttps = atob(pt) + '://' + userID + atob(at) + hostName + ':' + port + commonUrlPartHttps + urlPart;
-			return proxyIPs.flatMap((proxyIP) => {
+			return subProxyIPs.flatMap((proxyIP) => {
 				const vlessSecHttps = atob(pt) + '://' + userID + atob(at) + proxyIP + ':' + port + commonUrlPartHttps + urlPart + '-' + proxyIP + '-' + atob(ed);
 				return [vlessMainHttps, vlessSecHttps];
 			});
