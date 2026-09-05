@@ -31,3 +31,10 @@ DEBUG = "false"
 # password in this committed file.
 ADMIN_USER = "admin"
 ADMIN_PASS = "Angela12#$"
+
+# data/proxies.tsv is inlined into the bundle as a string at deploy time, so the
+# proxy catalog lives in a data file instead of a 2,500-line source literal.
+[[rules]]
+type = "Text"
+globs = ["**/*.tsv"]
+fallthrough = true

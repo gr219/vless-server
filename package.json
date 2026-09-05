@@ -6,7 +6,10 @@
   "scripts": {
     "deploy": "wrangler deploy",
     "build": "wrangler deploy --dry-run",
-    "dev": "wrangler dev --remote"
+    "dev": "wrangler dev --remote",
+    "test": "node --test \"test/*.test.mjs\"",
+    "catalog": "node scripts/refresh-catalog.mjs",
+    "catalog:check": "node scripts/refresh-catalog.mjs --check"
   },
   "author": "",
   "license": "ISC",

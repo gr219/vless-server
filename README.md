@@ -1,16 +1,21 @@
 # vless-server
 
-VLESS over WebSocket on Cloudflare Workers or Pages, with an authenticated
-browser at `/list` for picking a proxy and copying its client link.
+VLESS over WebSocket on Cloudflare Workers, with an authenticated browser at
+`/list` for picking a proxy and copying its client link. The proxy a user picks
+is the proxy their traffic leaves through.
 
 ## Deploy
 
 ```bash
+npm ci
+npm test
 npx wrangler deploy
 ```
 
-Pages deployments work the same way: the repository root is the build output and
-`_worker.js` is the entry point.
+The proxy catalog lives in `data/proxies.tsv` and is pulled into the bundle at
+deploy time by the `Text` rule in `wrangler.toml`, so `_worker.js` is no longer
+a standalone file. A Pages deployment therefore needs a build step
+(`npx wrangler deploy`) rather than serving the repository root as-is.
 
 ## Configuration
 
@@ -21,7 +26,7 @@ variables**.
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `UUID` | yes | One UUID, or several separated by commas. Every listed UUID authenticates and gets its own routes. |
-| `PROXYIP` | no | Outbound relay hosts, comma separated. One is picked at random per request. Falls back to the list baked into `_worker.js`. |
+| `PROXYIP` | no | Outbound relay hosts, comma separated. Used when a connection does not pin one itself; falls back to the list baked into `_worker.js`. |
 | `DNS_RESOLVER_URL` | no | DNS-over-HTTPS endpoint used for outbound UDP DNS. |
 | `ADMIN_USER` | for `/list` | HTTP Basic username for the proxy browser. |
 | `ADMIN_PASS` | for `/list` | HTTP Basic password for the proxy browser. |
@@ -41,12 +46,25 @@ site behind Cloudflare needs a relay. `PROXYIP` names that relay. Prefer the
 rotating hostnames in `wrangler.toml`: each resolves to a pool of working IPs
 that is refreshed continuously, so they keep working without redeploys.
 
+A client pins the relay it wants in its WebSocket path:
+
+```
+path=/?ed=2048&proxyip=ProxyIP.SG.CMLiussss.net
+```
+
+Every link `/list` and `/sub/<uuid>` generate carries that parameter, which is
+what makes a row's choice binding - the address in the link is always the
+worker's own edge. A connection with no `proxyip`, or with one that fails
+validation, falls back to a random host from `PROXYIP`. The value accepts a
+hostname, an IPv4 address or a bracketed IPv6 literal, with an optional
+`:port`.
+
 ## Routes
 
 | Route | Auth | Response |
 | --- | --- | --- |
 | `/list` | Basic | The proxy browser. |
-| `/list/measure` | Basic | `POST {"hosts":[...]}` - times a TCP handshake to each host from the Cloudflare edge. Up to 50 hosts per call. |
+| `/list/measure` | Basic | `POST {"hosts":[...]}` - probes each host from the Cloudflare edge. Up to 50 hosts per call. |
 | `/sub/<uuid>` | none | Base64 subscription for that UUID, across every supported port. |
 | `/bestip/<uuid>` | none | Proxies a third-party clean-IP subscription service for that UUID. |
 | `/cf` | none | The request's Cloudflare metadata, for debugging. |
@@ -58,9 +76,9 @@ WebSocket upgrades on any path carry the VLESS tunnel itself.
 
 ## The proxy browser
 
-`/list` renders every entry in the catalog baked into `_worker.js`: 13 rotating
-hostnames plus ~2,500 individual addresses across 62 countries, each verified to
-relay TLS to Cloudflare.
+`/list` renders every entry in `data/proxies.tsv`: rotating hostnames plus
+~2,500 individual addresses across 62 countries, each verified alive when the
+catalog was last refreshed.
 
 - Sort by any column; click the active column again to reverse it.
 - The caret on a header opens a per-column filter with its own search box.
@@ -69,22 +87,35 @@ relay TLS to Cloudflare.
   relevance until a column is chosen explicitly.
 - Pick a UUID to build links with; the Link column and every copy action follow
   it.
-- **Test Vinaphone** swaps the address in every generated link for
-  `vina.std.io.vn:443`, keeping the rest of the link and the row's tag intact.
-  Unticking it puts each row's own address back.
+- Every generated link dials the worker's own hostname and pins the row's proxy
+  in its path, so picking a row changes the route your traffic actually takes.
+- **Test Vinaphone** swaps that edge address for `vina.std.io.vn:443`, leaving
+  the pinned proxy and the row's tag intact.
 - Copy a single link from a row, or tick rows and copy them together, either as
   plain links or as a base64 subscription.
 - Two timing columns, deliberately kept apart because they measure different
   things and are not comparable:
-  - **Scan** - TCP + TLS + a full HTTP fetch of `/cdn-cgi/trace` *through* the
-    proxy to Cloudflare, timed from Central Europe when the catalog was built.
-    Always present, and the column the "max latency" filter applies to.
-  - **Edge** - a bare TCP handshake from the Cloudflare edge to the proxy, timed
-    on demand. No TLS, no HTTP, and it starts from a PoP usually close to the
-    proxy, so it lands far below the Scan figure for the same host. Click
-    **measure** in a row, or tick rows and use **Re-measure selected**.
+  - **Scan** - the TCP round trip recorded by whichever machine last refreshed
+    the catalog (a GitHub runner). A rough ranking hint, always present, and the
+    column the "max latency" filter applies to.
+  - **Edge** - measured on demand from the Cloudflare edge: the TCP handshake
+    plus the time to relay a TLS ClientHello for `speed.cloudflare.com` through
+    the proxy. Click **measure** in a row, or tick rows and use **Re-measure
+    selected**. Three outcomes:
+    - a time in milliseconds - the proxy connected *and* relayed;
+    - **no relay** (amber) - it accepted the connection but forwarded nothing,
+      or answered with a TLS alert. A dead proxy that still answers TCP, which
+      a handshake-only probe would have scored as healthy;
+    - **unreachable** (red) - no TCP connection at all.
 
-  Each column sorts on its own. Rows that were never probed sort last by Edge.
+  Each column sorts on its own. Rows that were never probed, and rows that will
+  not relay, sort last by Edge.
+
+  The Edge probe stops at the first response record. Measuring throughput would
+  mean completing the TLS handshake, and the Workers socket API ties the TLS SNI
+  to the connect hostname, so the edge cannot open a session *through* an
+  SNI-routed proxy. A megabytes-per-second figure needs a client that speaks the
+  tunnel end to end.
 
 ### Refreshing the catalog
 
@@ -92,11 +123,31 @@ Entries come from [NiREvil/vless](https://github.com/NiREvil/vless):
 [`ProxyIP.md`](https://github.com/NiREvil/vless/blob/main/sub/ProxyIP.md) for the
 rotating hostnames and
 [`ProxyIP-Daily.md`](https://github.com/NiREvil/vless/blob/main/sub/ProxyIP-Daily.md)
-for the daily scan. Both are re-tested by proxying a request to
-`https://speed.cloudflare.com/cdn-cgi/trace` through each candidate; anything
-that returns a trace is alive. Replace the `PROXY_CATALOG` block in `_worker.js`
-with the survivors, keeping the `country<TAB>host<TAB>isp<TAB>latencyMs<TAB>kind`
-layout.
+for the daily scan.
+
+```bash
+npm run catalog          # rewrite data/proxies.tsv from upstream
+npm run catalog:check    # exit 1 if it is out of date, changing nothing
+```
+
+The generator parses both files, drops anything that no longer answers on 443,
+and records each survivor's round trip as the Scan figure. It refuses to write a
+catalog that parses empty or comes back implausibly small, so an upstream layout
+change fails loudly instead of shipping a broken list.
+
+`.github/workflows/refresh-proxy-catalog.yml` runs it daily at 05:30 UTC and
+opens a pull request when the data changed. Merge it and redeploy - the catalog
+is bundled at deploy time, so a merge alone does not update the running worker.
+
+### Tests
+
+```bash
+npm test
+```
+
+Node's built-in runner, no dependencies. `test/load-worker.mjs` loads
+`_worker.js` outside the Workers runtime by stubbing `cloudflare:sockets` and
+inlining the catalog that wrangler would otherwise supply.
 
 ## Logging
 
