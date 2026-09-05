@@ -73,10 +73,17 @@ relay TLS to Cloudflare.
   Unticking it puts each row's own address back.
 - Copy a single link from a row, or tick rows and copy them together, either as
   plain links or as a base64 subscription.
-- The latency badge shows where the number came from. `scan` values were
-  measured from Central Europe when the catalog was built; click a badge, or use
-  **Re-measure selected**, to replace it with a `live` timing taken from the
-  Cloudflare edge.
+- Two timing columns, deliberately kept apart because they measure different
+  things and are not comparable:
+  - **Scan** - TCP + TLS + a full HTTP fetch of `/cdn-cgi/trace` *through* the
+    proxy to Cloudflare, timed from Central Europe when the catalog was built.
+    Always present, and the column the "max latency" filter applies to.
+  - **Edge** - a bare TCP handshake from the Cloudflare edge to the proxy, timed
+    on demand. No TLS, no HTTP, and it starts from a PoP usually close to the
+    proxy, so it lands far below the Scan figure for the same host. Click
+    **measure** in a row, or tick rows and use **Re-measure selected**.
+
+  Each column sorts on its own. Rows that were never probed sort last by Edge.
 
 ### Refreshing the catalog
 

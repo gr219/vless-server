@@ -3401,6 +3401,14 @@ const MEASURE_TIMEOUT_MS = 5000;
 
 /**
  * Times a TCP handshake to host:443 from the Cloudflare edge.
+ *
+ * This is deliberately NOT the same measurement as the catalog's latency
+ * figure. The catalog value is a full TCP + TLS + HTTP round trip made through
+ * the proxy to Cloudflare from a client machine; this is a bare TCP handshake
+ * from a Cloudflare PoP that is usually close to the proxy. Expect it to be far
+ * smaller, and do not compare the two - /list keeps them in separate columns
+ * for that reason.
+ *
  * @param {string} host
  * @returns {Promise<number | null>} round trip in milliseconds, or null if unreachable
  */
@@ -3539,7 +3547,7 @@ function renderProxyListPage(userIDs, hostName) {
 		<div class="flex h-full flex-col overflow-hidden">
 			<table class="w-full table-fixed border-collapse text-sm">
 				<colgroup>
-					<col class="w-10" /><col class="w-44" /><col class="w-56" /><col class="w-60" /><col class="w-40" /><col /><col class="w-24" />
+					<col class="w-10" /><col class="w-40" /><col class="w-52" /><col class="w-52" /><col class="w-28" /><col class="w-32" /><col /><col class="w-20" />
 				</colgroup>
 				<thead class="bg-slate-100 text-xs text-slate-500 dark:bg-slate-900 dark:text-slate-400">
 					<tr>
@@ -3547,7 +3555,8 @@ function renderProxyListPage(userIDs, hostName) {
 						<th class="px-2 py-2 text-left" data-col="cc"></th>
 						<th class="px-2 py-2 text-left" data-col="host"></th>
 						<th class="px-2 py-2 text-left" data-col="isp"></th>
-						<th class="px-2 py-2 text-left" data-col="latency"></th>
+						<th class="px-2 py-2 text-left" data-col="scan"></th>
+						<th class="px-2 py-2 text-left" data-col="edge"></th>
 						<th class="px-2 py-2 text-left" data-col="link"></th>
 						<th class="px-2 py-2 text-right uppercase tracking-wide">Action</th>
 					</tr>
@@ -3557,7 +3566,7 @@ function renderProxyListPage(userIDs, hostName) {
 				<div id="spacer" class="relative w-full">
 					<table id="bodyTable" class="w-full table-fixed border-collapse text-sm">
 						<colgroup>
-							<col class="w-10" /><col class="w-44" /><col class="w-56" /><col class="w-60" /><col class="w-40" /><col /><col class="w-24" />
+							<col class="w-10" /><col class="w-40" /><col class="w-52" /><col class="w-52" /><col class="w-28" /><col class="w-32" /><col /><col class="w-20" />
 						</colgroup>
 						<tbody id="rows" class="divide-y divide-slate-200 dark:divide-slate-800/70"></tbody>
 					</table>
@@ -3599,11 +3608,14 @@ function renderProxyListPage(userIDs, hostName) {
 	/** Address substituted into every link while "Test Vinaphone" is ticked. */
 	var VINAPHONE_ADDRESS = 'vina.std.io.vn:443';
 	var COLUMNS = [
-		{ key: 'cc', label: 'Country', filter: 'values' },
-		{ key: 'host', label: 'Host', filter: 'text' },
-		{ key: 'isp', label: 'ISP', filter: 'values' },
-		{ key: 'latency', label: 'Latency', filter: 'range' },
-		{ key: 'link', label: 'Link', filter: null }
+		{ key: 'cc', label: 'Country', filter: 'values', hint: '' },
+		{ key: 'host', label: 'Host', filter: 'text', hint: '' },
+		{ key: 'isp', label: 'ISP', filter: 'values', hint: '' },
+		{ key: 'scan', label: 'Scan', filter: 'range',
+			hint: 'TCP + TLS + HTTP round trip through the proxy to Cloudflare, measured from Central Europe when the catalog was built' },
+		{ key: 'edge', label: 'Edge', filter: null,
+			hint: 'TCP handshake from the Cloudflare edge to the proxy, measured on demand. Not comparable with Scan: no TLS, no HTTP, and a different origin' },
+		{ key: 'link', label: 'Link', filter: null, hint: '' }
 	];
 
 	var rows = DATA.rows.map(function (r, i) {
@@ -3617,7 +3629,7 @@ function renderProxyListPage(userIDs, hostName) {
 
 	var state = {
 		query: '',
-		sortKey: 'latency',
+		sortKey: 'scan',
 		sortDir: 1,
 		sortTouched: false,
 		byRelevance: false,
@@ -3666,9 +3678,11 @@ function renderProxyListPage(userIDs, hostName) {
 		return qi === query.length ? score : -1;
 	}
 
-	// undefined means never probed live, null means the live probe failed.
-	function latencyOf(row) {
-		return row.live === undefined ? row.latency : row.live;
+	// row.latency is the catalog scan; row.live is the on-demand edge probe:
+	// undefined means never probed, null means the probe found it unreachable.
+	function edgeSortValue(row) {
+		if (row.live === undefined || row.live === null) return Infinity;
+		return row.live;
 	}
 
 	function linkFor(row) {
@@ -3682,10 +3696,8 @@ function renderProxyListPage(userIDs, hostName) {
 	}
 
 	function sortValue(row, key) {
-		if (key === 'latency') {
-			var value = latencyOf(row);
-			return value === null ? Infinity : value;
-		}
+		if (key === 'scan') return row.latency;
+		if (key === 'edge') return edgeSortValue(row);
 		if (key === 'cc') return row.country;
 		if (key === 'link') return linkFor(row);
 		return row[key];
@@ -3701,10 +3713,7 @@ function renderProxyListPage(userIDs, hostName) {
 			if (f.cc && !f.cc[row.cc]) continue;
 			if (f.isp && !f.isp[row.isp]) continue;
 			if (hostNeedle && row.host.toLowerCase().indexOf(hostNeedle) === -1) continue;
-			if (f.latencyMax !== null) {
-				var current = latencyOf(row);
-				if (current === null || current > f.latencyMax) continue;
-			}
+			if (f.latencyMax !== null && row.latency > f.latencyMax) continue;
 			if (query) {
 				var score = fuzzy(row.haystack, query);
 				if (score < 0) continue;
@@ -3756,9 +3765,10 @@ function renderProxyListPage(userIDs, hostName) {
 			var filtered = (col.key === 'cc' && state.filters.cc)
 				|| (col.key === 'isp' && state.filters.isp)
 				|| (col.key === 'host' && state.filters.host !== '')
-				|| (col.key === 'latency' && state.filters.latencyMax !== null);
+				|| (col.key === 'scan' && state.filters.latencyMax !== null);
 			var html = '<div class="flex items-center gap-1">'
 				+ '<button type="button" data-sort="' + col.key + '" title="Sort by ' + esc(col.label)
+				+ (col.hint ? '. ' + esc(col.hint) : '')
 				+ '" class="flex-1 truncate text-left uppercase tracking-wide hover:text-slate-900 dark:hover:text-slate-100'
 				+ (active ? ' text-slate-900 dark:text-slate-100' : '') + '">' + esc(col.label) + arrow + '</button>';
 			if (col.filter) {
@@ -3783,21 +3793,22 @@ function renderProxyListPage(userIDs, hostName) {
 		for (var i = start; i < end; i++) {
 			var row = state.view[i];
 			var checked = state.selected[row.id] ? ' checked' : '';
-			var value = latencyOf(row);
-			var badge;
+			var edgeCell;
 			if (row.measuring) {
-				badge = '<span class="ml-1 rounded bg-sky-600/20 px-1 text-[10px] text-sky-600 dark:text-sky-400">probing</span>';
+				edgeCell = '<span class="text-[11px] text-sky-600 dark:text-sky-400">probing...</span>';
+			} else if (row.live === undefined) {
+				edgeCell = '<button type="button" data-remeasure="' + row.id
+					+ '" title="Time a TCP handshake to this host from the Cloudflare edge"'
+					+ ' class="rounded border border-dashed border-slate-300 px-1.5 text-[11px] text-slate-400'
+					+ ' hover:border-sky-500 hover:text-sky-600 dark:border-slate-700 dark:text-slate-500 dark:hover:text-sky-400">measure</button>';
 			} else {
-				badge = '<button type="button" data-remeasure="' + row.id
-					+ '" title="Measure this host from the Cloudflare edge now" class="ml-1 rounded px-1 text-[10px] '
-					+ (row.live === undefined
-						? 'bg-slate-200 text-slate-500 hover:bg-slate-300 hover:text-slate-800 dark:bg-slate-700/60 dark:text-slate-400 dark:hover:bg-slate-600 dark:hover:text-slate-100">scan'
-						: 'bg-emerald-600/20 text-emerald-700 hover:bg-emerald-600/40 dark:text-emerald-400 dark:hover:text-emerald-200">live')
+				edgeCell = '<button type="button" data-remeasure="' + row.id + '" title="Measure again"'
+					+ ' class="rounded px-1 text-xs hover:underline '
+					+ (row.live === null
+						? 'text-rose-500 dark:text-rose-400">unreachable'
+						: 'tabular-nums text-emerald-700 dark:text-emerald-400">' + row.live + ' ms')
 					+ '</button>';
 			}
-			var latencyCell = (value === null
-				? '<span class="text-rose-500 dark:text-rose-400">unreachable</span>'
-				: '<span class="tabular-nums">' + value + ' ms</span>') + badge;
 			var link = linkFor(row);
 			html += '<tr class="hover:bg-slate-50 dark:hover:bg-slate-900/60" style="height:' + ROW_HEIGHT + 'px">'
 				+ '<td class="px-2"><input type="checkbox" data-id="' + row.id + '" class="h-4 w-4 accent-sky-500"' + checked + ' /></td>'
@@ -3806,7 +3817,8 @@ function renderProxyListPage(userIDs, hostName) {
 				+ (row.kind === 'pool' ? '<span class="ml-2 rounded bg-indigo-600/20 px-1 text-[10px] text-indigo-700 dark:text-indigo-300">pool</span>' : '')
 				+ '</td>'
 				+ '<td class="truncate px-2 text-slate-500 dark:text-slate-400">' + esc(row.isp) + '</td>'
-				+ '<td class="px-2">' + latencyCell + '</td>'
+				+ '<td class="px-2 tabular-nums text-slate-500 dark:text-slate-400">' + row.latency + ' ms</td>'
+				+ '<td class="px-2">' + edgeCell + '</td>'
 				+ '<td class="px-2"><button type="button" data-copy="' + row.id + '" title="' + esc(link)
 				+ '" class="block w-full truncate text-left font-mono text-[11px] text-sky-700 hover:underline dark:text-sky-400">'
 				+ esc(link) + '</button></td>'
@@ -3954,7 +3966,7 @@ function renderProxyListPage(userIDs, hostName) {
 		}
 
 		if (col.filter === 'range') {
-			el.popover.innerHTML = '<label class="mb-1 block text-[11px] uppercase tracking-wide text-slate-500">Max latency (ms)</label>'
+			el.popover.innerHTML = '<label class="mb-1 block text-[11px] uppercase tracking-wide text-slate-500">Max scan latency (ms)</label>'
 				+ '<input id="pf-range" type="number" min="0" step="50" class="' + INPUT_CLASS + '" value="'
 				+ (state.filters.latencyMax === null ? '' : state.filters.latencyMax) + '" />';
 			var range = pick('pf-range');
@@ -4100,7 +4112,7 @@ function renderProxyListPage(userIDs, hostName) {
 	pick('clearFilters').addEventListener('click', function () {
 		state.query = '';
 		el.search.value = '';
-		state.sortKey = 'latency';
+		state.sortKey = 'scan';
 		state.sortDir = 1;
 		state.sortTouched = false;
 		state.filters = { cc: null, isp: null, host: '', latencyMax: null };
