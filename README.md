@@ -1,108 +1,101 @@
-# EDtunnel
-Use Cloudflare pages and worker serverless to implement VLESS protocol.
+# vless-server
 
-<br>
+VLESS over WebSocket on Cloudflare Workers or Pages, with an authenticated
+browser at `/list` for picking a proxy and copying its client link.
 
-## Deploy in pages.dev
-1. See YouTube Video: [https://www.youtube.com/watch?v=8I-yTNHB0aw](https://www.youtube.com/watch?v=8I-yTNHB0aw)
-2. Clone this repository deploy in cloudflare pages.
+## Deploy
 
-## Deploy in worker.dev
-1. Copy `_worker.js` code from [here](https://github.com/Vauth/vless-cf/blob/main/_worker.js).
-2. Alternatively, you can click the button below to deploy directly.
-
-[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Vauth/vless-cf)
-
-
-## DoH with Cloudflare
-1. Follow the https://github.com/serverless-dns/serverless-dns .
-2. Replace the dns url with `dohURL` value in `_worker.js` .
-
-## UUID Setting (Optional)
-
-1. When deploy in cloudflare pages, you can set uuid in `wrangler.toml` file. variable name is `UUID`. `wrangler.toml` file is also supported. (recommended) in case deploy in webpages, you can not set uuid in `wrangler.toml` file.
-
-2. When deploy in worker.dev, you can set uuid in `_worker.js` file. variable name is `userID`. `wrangler.toml` file is also supported. (recommended) in case deploy in webpages, you can not set uuid in `wrangler.toml` file. in this case, you can also set uuid in `UUID` enviroment variable.
-
-Note: `UUID` is the uuid you want to set. pages.dev and worker.dev all of them method supported, but depend on your deploy method.
-
-### UUID Setting Example
-
-1. single uuid environment variable
-
-   ```.environment
-   UUID = "uuid here your want to set"
-   ```
-
-2. multiple uuid environment variable
-
-   ```.environment
-   UUID = "uuid1,uuid2,uuid3"
-   ```
-
-   note: uuid1, uuid2, uuid3 are separated by commas`,`.
-   when you set multiple uuid, you can use `https://edtunnel.pages.dev/uuid1` to get the clash config and vless:// link.
-
-## subscribe vless:// link (Optional)
-
-1. visit `https://edtunnel.pages.dev/uuid your set` to get the subscribe link.
-
-2. visit `https://edtunnel.pages.dev/sub/uuid your set` to get the subscribe content with `uuid your set` path.
-
-   note: `uuid your set` is the uuid you set in UUID enviroment or `wrangler.toml`, `_worker.js` file.
-   when you set multiple uuid, you can use `https://edtunnel.pages.dev/sub/uuid1` to get the subscribe content with `uuid1` path.(only support first uuid in multiple uuid set)
-
-3. visit `https://edtunnel.pages.dev/sub/uuid your set/?format=clash` to get the subscribe content with `uuid your set` path and `clash` format. content will return with base64 encode.
-
-   note: `uuid your set` is the uuid you set in UUID enviroment or `wrangler.toml`, `_worker.js` file.
-   when you set multiple uuid, you can will use `https://edtunnel.pages.dev/sub/uuid1/?format=clash` to get the subscribe content with `uuid1` path and `clash` format.(only support first uuid in multiple uuid set)
-
-## subscribe Cloudflare bestip(pure ip) link
-
-1. visit `https://edtunnel.pages.dev/bestip/uuid your set` to get subscribe info.
-
-2. cpoy subscribe url link `https://edtunnel.pages.dev/bestip/uuid your set` to any clients(clash/v2rayN/v2rayNG) you want to use.
-
-3. done. if have any questions please join [@edtunnel](https://t.me/edtunnel)
-
-## multiple port support (Optional)
-
-   <!-- let portArray_http = [80, 8080, 8880, 2052, 2086, 2095];
-	let portArray_https = [443, 8443, 2053, 2096, 2087, 2083]; -->
-
-For a list of Cloudflare supported ports, please refer to the [official documentation](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/ports).
-
-By default, the port is 80 and 443. If you want to add more ports, you can use the following ports:
-
-```text
-80, 8080, 8880, 2052, 2086, 2095, 443, 8443, 2053, 2096, 2087, 2083
-http port: 80, 8080, 8880, 2052, 2086, 2095
-https port: 443, 8443, 2053, 2096, 2087, 2083
+```bash
+npx wrangler deploy
 ```
 
-if you deploy in cloudflare pages, https port is not supported. Simply add multiple ports node drictly use subscribe link, subscribe content will return all Cloudflare supported ports.
+Pages deployments work the same way: the repository root is the build output and
+`_worker.js` is the entry point.
 
-## proxyIP (Optional)
+## Configuration
 
-1. When deploy in cloudflare pages, you can set proxyIP in `wrangler.toml` file. variable name is `PROXYIP`.
+All settings are environment variables. `wrangler.toml` holds them for local and
+Workers deploys; on Pages, set the same names under **Settings -> Environment
+variables**.
 
-2. When deploy in worker.dev, you can set proxyIP in `_worker.js` file. variable name is `proxyIP`.
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `UUID` | yes | One UUID, or several separated by commas. Every listed UUID authenticates and gets its own routes. |
+| `PROXYIP` | no | Outbound relay hosts, comma separated. One is picked at random per request. Falls back to the list baked into `_worker.js`. |
+| `DNS_RESOLVER_URL` | no | DNS-over-HTTPS endpoint used for outbound UDP DNS. |
+| `ADMIN_USER` | for `/list` | HTTP Basic username for the proxy browser. |
+| `ADMIN_PASS` | for `/list` | HTTP Basic password for the proxy browser. |
 
-note: `proxyIP` is the ip or domain you want to set. this means that the proxyIP is used to route traffic through a proxy rather than directly to a website that is using Cloudflare's (CDN). if you don't set this variable, connection to the Cloudflare IP will be cancelled (or blocked)...
+`/list` answers `503` while `ADMIN_USER` or `ADMIN_PASS` is unset. Once the
+worker is deployed, move the password out of the committed file:
 
-resons: Outbound TCP sockets to Cloudflare IP ranges are temporarily blocked, please refer to the [tcp-sockets documentation](https://developers.cloudflare.com/workers/runtime-apis/tcp-sockets/#considerations)
+```bash
+npx wrangler secret put ADMIN_PASS
+```
 
-## Usage
+### About `PROXYIP`
 
-frist, open your pages.dev domain `https://edtunnel.pages.dev/` in your browser, then you can see the following page:
-The path `/uuid your seetting` to get the clash config and vless:// link.
+Cloudflare blocks outbound TCP from a Worker to its own IP ranges, so reaching a
+site behind Cloudflare needs a relay. `PROXYIP` names that relay. Prefer the
+rotating hostnames in `wrangler.toml`: each resolves to a pool of working IPs
+that is refreshed continuously, so they keep working without redeploys.
 
-## Star History
+## Routes
 
-<a href="https://www.star-history.com/#vauth/vless-cf&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=vauth/vless-cf&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=vauth/vless-cf&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=vauth/vless-cf&type=Date" />
- </picture>
-</a>
+| Route | Auth | Response |
+| --- | --- | --- |
+| `/list` | Basic | The proxy browser. |
+| `/list/measure` | Basic | `POST {"hosts":[...]}` - times a TCP handshake to each host from the Cloudflare edge. Up to 50 hosts per call. |
+| `/sub/<uuid>` | none | Base64 subscription for that UUID, across every supported port. |
+| `/bestip/<uuid>` | none | Proxies a third-party clean-IP subscription service for that UUID. |
+| `/cf` | none | The request's Cloudflare metadata, for debugging. |
+| anything else | none | Reverse-proxies a decoy hostname. |
+
+`<uuid>` may be any UUID listed in `UUID`, not only the first.
+
+WebSocket upgrades on any path carry the VLESS tunnel itself.
+
+## The proxy browser
+
+`/list` renders every entry in the catalog baked into `_worker.js`: 13 rotating
+hostnames plus ~2,500 individual addresses across 62 countries, each verified to
+relay TLS to Cloudflare.
+
+- Sort by any column; click the active column again to reverse it.
+- The caret on a header opens a per-column filter with its own search box.
+  Country and ISP filter by value, Host by substring, Latency by upper bound.
+- The search box does a fuzzy match over country, host and ISP. Results rank by
+  relevance until a column is chosen explicitly.
+- Pick a UUID to build links with; the Link column and every copy action follow
+  it.
+- **Test Vinaphone** swaps the address in every generated link for
+  `vina.std.io.vn:443`, keeping the rest of the link and the row's tag intact.
+  Unticking it puts each row's own address back.
+- Copy a single link from a row, or tick rows and copy them together, either as
+  plain links or as a base64 subscription.
+- The latency badge shows where the number came from. `scan` values were
+  measured from Central Europe when the catalog was built; click a badge, or use
+  **Re-measure selected**, to replace it with a `live` timing taken from the
+  Cloudflare edge.
+
+### Refreshing the catalog
+
+Entries come from [NiREvil/vless](https://github.com/NiREvil/vless):
+[`ProxyIP.md`](https://github.com/NiREvil/vless/blob/main/sub/ProxyIP.md) for the
+rotating hostnames and
+[`ProxyIP-Daily.md`](https://github.com/NiREvil/vless/blob/main/sub/ProxyIP-Daily.md)
+for the daily scan. Both are re-tested by proxying a request to
+`https://speed.cloudflare.com/cdn-cgi/trace` through each candidate; anything
+that returns a trace is alive. Replace the `PROXY_CATALOG` block in `_worker.js`
+with the survivors, keeping the `country<TAB>host<TAB>isp<TAB>latencyMs<TAB>kind`
+layout.
+
+## Ports
+
+Cloudflare terminates HTTP on `80, 8080, 8880, 2052, 2086, 2095, 2082` and HTTPS
+on `443, 8443, 2053, 2096, 2087, 2083`. Pages deployments serve HTTPS ports only.
+`/sub/<uuid>` emits a node for every supported port.
+
+## License
+
+See [LICENSE](LICENSE).

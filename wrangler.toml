@@ -1,19 +1,19 @@
 name = "vless-server" # todo
-#name = "cf-worker-connect-test" # todo
-#main = "test/worker/cf-cdn-cgi-trace2.js"
-#main = "test/worker/worker-connect-test.js"
 main = "_worker.js"
 compatibility_date = "2025-02-24"
 
 [vars]
-# UUID = "d342d11e-d424-4583-b36e-524ab1f0afa4"
-# PROXYIP = "1.2.3.4"
-# Comma-separated list; the worker picks one at random per request.
+UUID = "1b6c1745-992e-4aac-8685-266c090e50ea,89b64978-6244-4bf3-bf64-67ade4ce5c8f,d342d11e-d424-4583-b36e-524ab1f0afa4"
+
+# Outbound relay hosts, comma separated; one is picked at random per request.
 # All entries verified alive on 2026-09-05 against speed.cloudflare.com.
 PROXYIP = "proxyip.cmliussss.net,ProxyIP.DE.CMLiussss.net,ProxyIP.US.CMLiussss.net,ProxyIP.SG.CMLiussss.net,ProxyIP.JP.CMLiussss.net,ProxyIP.KR.CMLiussss.net,ProxyIP.HK.CMLiussss.net,di.nscl.ir,proxy.farel.is-a.dev,bpb.yousef.isegaro.com,tr.diam4.ggff.net,proxyip.oracle.fxxk.dedyn.io,proxyip.leilaomi.cc.cd"
-# DNS_RESOLVER_URL = "https://cloudflare-dns.com/dns-query"
+
 DNS_RESOLVER_URL = "https://cloudflare-dns.com/dns-query"
-# NODE_ID = "1"
-# API_TOKEN = "example_dev_token"
-# API_HOST = "api.v2board.com"
-UUID = "1b6c1745-992e-4aac-8685-266c090e50ea,89b64978-6244-4bf3-bf64-67ade4ce5c8f,d342d11e-d424-4583-b36e-524ab1f0afa4"
+
+# HTTP Basic credentials for the /list proxy browser.
+# /list answers 503 while either of these is unset.
+# Once deployed, prefer `wrangler secret put ADMIN_PASS` over keeping the
+# password in this committed file.
+ADMIN_USER = "admin"
+ADMIN_PASS = "Angela12#$"
