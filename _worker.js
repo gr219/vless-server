@@ -227,6 +227,24 @@ async function vlessOverWSHandler(request) {
 	let address = '';
 	let portWithRandomLog = '';
 	let currentDate = new Date();
+	/**
+	 * Per-connection totals. The free tier spends one 10 ms CPU budget on the
+	 * whole WebSocket session, so the useful question is how many bytes a
+	 * connection carried before it died. One log line per connection at close.
+	 */
+	const stats = { up: 0, down: 0, started: Date.now(), logged: false };
+	const logConnectionStats = (/** @type {string} */ outcome) => {
+		if (stats.logged) return;
+		stats.logged = true;
+		console.log('conn', JSON.stringify({
+			outcome,
+			target: `${address}:${portWithRandomLog}`.trim(),
+			upBytes: stats.up,
+			downBytes: stats.down,
+			totalBytes: stats.up + stats.down,
+			ms: Date.now() - stats.started,
+		}));
+	};
 	const log = debugLogging
 		? (/** @type {string} */ info, /** @type {string | undefined} */ event) => {
 			console.log(`[${currentDate} ${address}:${portWithRandomLog}] ${info}`, event || '');
@@ -246,6 +264,7 @@ async function vlessOverWSHandler(request) {
 	// ws --> remote
 	readableWebSocketStream.pipeTo(new WritableStream({
 		async write(chunk, controller) {
+			stats.up += chunk.byteLength || 0;
 			if (isDns && udpStreamWrite) {
 				return udpStreamWrite(chunk);
 			}
@@ -293,15 +312,18 @@ async function vlessOverWSHandler(request) {
 				udpStreamWrite(rawClientData);
 				return;
 			}
-			handleTCPOutBound(remoteSocketWapper, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log);
+			handleTCPOutBound(remoteSocketWapper, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log, stats);
 		},
 		close() {
+			logConnectionStats('close');
 			log(`readableWebSocketStream is close`);
 		},
 		abort(reason) {
+			logConnectionStats('abort');
 			log(`readableWebSocketStream is abort`, JSON.stringify(reason));
 		},
 	})).catch((err) => {
+		logConnectionStats('error');
 		log('readableWebSocketStream pipeTo error', err);
 	});
 
@@ -323,7 +345,7 @@ async function vlessOverWSHandler(request) {
  * @param {function} log The logging function.
  * @returns {Promise<void>} The remote socket.
  */
-async function handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log,) {
+async function handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log, stats) {
 
 	/**
 	 * Connects to a given address and port and writes data to the socket.
@@ -356,14 +378,14 @@ async function handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawCli
 		}).finally(() => {
 			safeCloseWebSocket(webSocket);
 		})
-		remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, null, log);
+		remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, null, log, stats);
 	}
 
 	const tcpSocket = await connectAndWrite(addressRemote, portRemote);
 
 	// when remoteSocket is ready, pass to websocket
 	// remote--> ws
-	remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, retry, log);
+	remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, retry, log, stats);
 }
 
 /**
@@ -561,7 +583,7 @@ function processVlessHeader(vlessBuffer, userID) {
  * @param {(info: string) => void} log The logging function.
  * @returns {Promise<void>} A Promise that resolves when the conversion is complete.
  */
-async function remoteSocketToWS(remoteSocket, webSocket, vlessResponseHeader, retry, log) {
+async function remoteSocketToWS(remoteSocket, webSocket, vlessResponseHeader, retry, log, stats) {
 	// remote--> ws
 	let remoteChunkCount = 0;
 	let chunks = [];
@@ -581,6 +603,7 @@ async function remoteSocketToWS(remoteSocket, webSocket, vlessResponseHeader, re
 				async write(chunk, controller) {
 					hasIncomingData = true;
 					remoteChunkCount++;
+					if (stats) stats.down += chunk.byteLength || 0;
 					if (webSocket.readyState !== WS_READY_STATE_OPEN) {
 						controller.error(
 							'webSocket.readyState is not open, maybe close'

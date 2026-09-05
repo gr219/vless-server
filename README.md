@@ -137,9 +137,30 @@ amount of code tuning will fix them on the free tier. The Workers Paid plan
 ($5/month) raises the limit from 10 ms to 30 s per invocation, which is the
 actual remedy for a proxy carrying real traffic.
 
-To find out which it is, check the logs: entries tagged with a `/list` or
-`/sub/` path point at the HTTP routes, while errors on WebSocket invocations
-point at the tunnel.
+### Finding the ceiling
+
+Every tunnel connection logs one line when it closes:
+
+```
+conn {"outcome":"close","target":"example.com:443 tcp","upBytes":41984,
+      "downBytes":8317440,"totalBytes":8359424,"ms":12043}
+```
+
+Sort those by `totalBytes` and compare against the CPU errors. The largest
+`totalBytes` a connection reaches before dying is the practical per-connection
+ceiling on this plan. If connections die at a consistent byte figure, the relay
+is the cause and only the paid plan or a transport that recycles connections
+will move it. If they die at wildly different sizes, or at very small ones, look
+elsewhere first.
+
+Two other free-tier limits produce failures that look similar but are not CPU:
+
+- **50 subrequests per invocation.** DNS sent through the tunnel costs one
+  `fetch` to `DNS_RESOLVER_URL` per query, all charged to the same WebSocket
+  invocation. A connection that issues more than 50 DNS queries fails with
+  `Too many subrequests`. Resolving DNS on the client avoids this.
+- **100k requests per day**, which any transport that splits a stream across
+  many HTTP requests will reach quickly.
 
 ## Ports
 
