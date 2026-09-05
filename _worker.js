@@ -58,6 +58,18 @@ function parseProxyIPs(rawProxyIP) {
 	return rawProxyIP.split(',').map((host) => host.trim()).filter((host) => host.length > 0);
 }
 
+/**
+ * Per-connection tunnel logging. Off by default: on the Workers free tier the
+ * whole WebSocket session shares one 10 ms CPU budget, and building a log line
+ * per stream event is real work even when nothing reads it. Set DEBUG=true to
+ * turn it back on while diagnosing.
+ * @type {boolean}
+ */
+let debugLogging = false;
+
+/** Shared no-op so the hot path allocates nothing when DEBUG is off. */
+const noopLog = () => {};
+
 let dohURL = 'https://freedns.controld.com/p0'; // https://github.com/serverless-dns/serverless-dns OR xxx.xxx.workers.dev [README.md]
 
 if (!isValidUUID(userID)) {
@@ -81,6 +93,7 @@ export default {
 			}
 			proxyIP = proxyIPs[Math.floor(Math.random() * proxyIPs.length)];
 			dohURL = env.DNS_RESOLVER_URL || dohURL;
+			debugLogging = env.DEBUG === 'true';
 			const userIDs = userID.split(',').map((id) => id.trim()).filter((id) => id.length > 0);
 			const upgradeHeader = request.headers.get('Upgrade');
 			if (!upgradeHeader || upgradeHeader !== 'websocket') {
@@ -214,9 +227,11 @@ async function vlessOverWSHandler(request) {
 	let address = '';
 	let portWithRandomLog = '';
 	let currentDate = new Date();
-	const log = (/** @type {string} */ info, /** @type {string | undefined} */ event) => {
-		console.log(`[${currentDate} ${address}:${portWithRandomLog}] ${info}`, event || '');
-	};
+	const log = debugLogging
+		? (/** @type {string} */ info, /** @type {string | undefined} */ event) => {
+			console.log(`[${currentDate} ${address}:${portWithRandomLog}] ${info}`, event || '');
+		}
+		: noopLog;
 	const earlyDataHeader = request.headers.get('sec-websocket-protocol') || '';
 
 	const readableWebSocketStream = makeReadableWebSocketStream(webSocket, earlyDataHeader, log);
@@ -438,7 +453,6 @@ function processVlessHeader(vlessBuffer, userID) {
 	// isValidUser = uuids.some(userUuid => slicedBufferString === userUuid.trim());
 	isValidUser = uuids.some(userUuid => slicedBufferString === userUuid.trim()) || uuids.length === 1 && slicedBufferString === uuids[0].trim();
 
-	console.log(`userID: ${slicedBufferString}`);
 
 	if (!isValidUser) {
 		return {
@@ -3486,7 +3500,28 @@ const COUNTRY_NAMES = {"AD": "AD", "AE": "United Arab Emirates", "AL": "Albania"
  * @param {string | null} hostName the worker hostname, used as SNI and Host in generated links
  * @returns {string} a complete HTML document
  */
+/**
+ * Memoised /list document. The page only varies by hostname and UUID list, so
+ * an isolate serialises the ~2,500 row catalog once instead of on every hit.
+ * @type {{ key: string, html: string } | null}
+ */
+let cachedListPage = null;
+
 function renderProxyListPage(userIDs, hostName) {
+	const cacheKey = `${hostName}|${userIDs.join(',')}`;
+	if (cachedListPage && cachedListPage.key === cacheKey) return cachedListPage.html;
+	const html = buildProxyListPage(userIDs, hostName);
+	cachedListPage = { key: cacheKey, html };
+	return html;
+}
+
+/**
+ * Builds the /list document from scratch.
+ * @param {string[]} userIDs
+ * @param {string | null} hostName
+ * @returns {string}
+ */
+function buildProxyListPage(userIDs, hostName) {
 	const bootstrap = JSON.stringify({
 		host: hostName || '',
 		uuids: userIDs,

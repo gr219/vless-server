@@ -25,6 +25,7 @@ variables**.
 | `DNS_RESOLVER_URL` | no | DNS-over-HTTPS endpoint used for outbound UDP DNS. |
 | `ADMIN_USER` | for `/list` | HTTP Basic username for the proxy browser. |
 | `ADMIN_PASS` | for `/list` | HTTP Basic password for the proxy browser. |
+| `DEBUG` | no | `"true"` turns on per-connection tunnel logging. Off by default; see [CPU limits](#cpu-limits). |
 
 `/list` answers `503` while `ADMIN_USER` or `ADMIN_PASS` is unset. Once the
 worker is deployed, move the password out of the committed file:
@@ -96,6 +97,49 @@ for the daily scan. Both are re-tested by proxying a request to
 that returns a trace is alive. Replace the `PROXY_CATALOG` block in `_worker.js`
 with the survivors, keeping the `country<TAB>host<TAB>isp<TAB>latencyMs<TAB>kind`
 layout.
+
+## Logging
+
+`[observability]` in `wrangler.toml` enables Workers Logs, so console output is
+retained and searchable in the dashboard under **Workers -> vless-server ->
+Logs**. Without it, output is only visible live:
+
+```bash
+npx wrangler tail
+npx wrangler tail --status error      # just the failures
+```
+
+By default the worker logs errors and nothing else. `DEBUG="true"` adds a line
+per tunnel event (stream open, close, abort, retry, DNS). Turn it on to
+diagnose, then turn it back off - see below for why.
+
+The client's UUID is deliberately never logged.
+
+## CPU limits
+
+The Workers **free tier allows 10 ms of CPU per invocation**. A WebSocket tunnel
+is a *single* invocation that lives for the whole session, so every millisecond
+of JavaScript spent relaying that connection accrues to one 10 ms budget. A busy
+tunnel will exhaust it, and Cloudflare reports `Worker exceeded CPU time limit`.
+
+Waiting on the network is not CPU time, so an idle connection is fine. The cost
+is proportional to how much JavaScript runs per chunk relayed.
+
+What this repository does to keep the hot path cheap:
+
+- Tunnel logging is off unless `DEBUG="true"`. When off, `log()` is a shared
+  no-op, so no strings are built and no I/O is queued per stream event.
+- The `/list` document is memoised per isolate, so the ~2,500 row catalog is
+  serialised once rather than on every request.
+
+If the errors persist after that, they are coming from the tunnel itself and no
+amount of code tuning will fix them on the free tier. The Workers Paid plan
+($5/month) raises the limit from 10 ms to 30 s per invocation, which is the
+actual remedy for a proxy carrying real traffic.
+
+To find out which it is, check the logs: entries tagged with a `/list` or
+`/sub/` path point at the HTTP routes, while errors on WebSocket invocations
+point at the tunnel.
 
 ## Ports
 

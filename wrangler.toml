@@ -2,6 +2,15 @@ name = "vless-server" # todo
 main = "_worker.js"
 compatibility_date = "2025-02-24"
 
+# Workers Logs. Without this, console output is only visible live via
+# `wrangler tail`; with it, logs are retained and queryable in the dashboard
+# under Workers -> vless-server -> Logs.
+# head_sampling_rate is the fraction of requests logged. Drop it (0.1 = 10%)
+# if log volume becomes a cost or CPU concern on a busy worker.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
 [vars]
 UUID = "1b6c1745-992e-4aac-8685-266c090e50ea,89b64978-6244-4bf3-bf64-67ade4ce5c8f,d342d11e-d424-4583-b36e-524ab1f0afa4"
 
@@ -10,6 +19,11 @@ UUID = "1b6c1745-992e-4aac-8685-266c090e50ea,89b64978-6244-4bf3-bf64-67ade4ce5c8
 PROXYIP = "proxyip.cmliussss.net,ProxyIP.DE.CMLiussss.net,ProxyIP.US.CMLiussss.net,ProxyIP.SG.CMLiussss.net,ProxyIP.JP.CMLiussss.net,ProxyIP.KR.CMLiussss.net,ProxyIP.HK.CMLiussss.net,di.nscl.ir,proxy.farel.is-a.dev,bpb.yousef.isegaro.com,tr.diam4.ggff.net,proxyip.oracle.fxxk.dedyn.io,proxyip.leilaomi.cc.cd"
 
 DNS_RESOLVER_URL = "https://cloudflare-dns.com/dns-query"
+
+# Per-connection tunnel logging. Off by default because on the free tier a whole
+# WebSocket session shares one 10 ms CPU budget and each log line is real work.
+# Set to "true" only while diagnosing a tunnel problem.
+DEBUG = "false"
 
 # HTTP Basic credentials for the /list proxy browser.
 # /list answers 503 while either of these is unset.
