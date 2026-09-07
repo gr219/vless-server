@@ -80,6 +80,26 @@ validation, falls back to a random host from `PROXYIP`. The value accepts a
 hostname, an IPv4 address or a bracketed IPv6 literal, with an optional
 `:port`.
 
+The selected relay is the route, not a fallback: the outbound connection is
+opened through it, so the exit IP is the relay's. The two cases differ in what
+happens when the relay is unreachable:
+
+| Selection | First hop | If it fails |
+| --- | --- | --- |
+| `proxyip=` pinned by the client | the pinned relay | the connection fails |
+| random host from `PROXYIP` | that host | retries direct |
+
+A pinned relay never falls back to a direct connection. Picking a row in
+`/list` is a deliberate choice of exit IP, and quietly reverting to direct
+would hand out the host's own address instead without saying so.
+
+This matters most off Cloudflare. Earlier revisions connected direct first and
+only reached for the relay when that returned no data, which looked correct on
+Workers - Cloudflare blocks outbound connections to its own ranges, so the
+direct attempt failed and the relay took over. Anywhere egress is unrestricted,
+such as the GitHub Actions host, the direct attempt simply succeeded and
+`proxyip` never had any effect at all.
+
 ## Routes
 
 | Route | Auth | Response |

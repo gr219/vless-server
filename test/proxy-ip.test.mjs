@@ -44,12 +44,13 @@ test('parseRequestedProxyIP returns null for an unparseable URL', () => {
 });
 
 test('selectProxyIP honours the pinned choice over the pool', () => {
-	const pinned = { host: '1.2.3.4', port: null };
-	assert.deepEqual(selectProxyIP(pinned, ['pool.example.com']), pinned);
+	assert.deepEqual(selectProxyIP({ host: '1.2.3.4', port: null }, ['pool.example.com']),
+		{ host: '1.2.3.4', port: null, pinned: true });
 });
 
 test('selectProxyIP falls back to a pool member when nothing is pinned', () => {
-	assert.deepEqual(selectProxyIP(null, ['only.example.com']), { host: 'only.example.com', port: null });
+	assert.deepEqual(selectProxyIP(null, ['only.example.com']),
+		{ host: 'only.example.com', port: null, pinned: false });
 });
 
 test('selectProxyIP returns null when nothing is pinned and the pool is empty', () => {

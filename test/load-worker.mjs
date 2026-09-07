@@ -31,7 +31,11 @@ export async function loadWorker() {
 	}
 	const generated = path.join(here, '.generated');
 	await mkdir(generated, { recursive: true });
-	const target = path.join(generated, 'worker.mjs');
+	// `node --test` runs each test file in its own process, in parallel. A
+	// single shared filename let one process import the module while another
+	// was still writing it, which surfaced as unrelated test files failing at
+	// random. The pid gives every writer its own target.
+	const target = path.join(generated, `worker.${process.pid}.mjs`);
 	await writeFile(target, patched, 'utf8');
 	return import(`file://${target.split(path.sep).join('/')}`);
 }

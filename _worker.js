@@ -101,13 +101,43 @@ export function parseRequestedProxyIP(requestUrl) {
  * it passed validation, otherwise a random host from the configured pool.
  * @param {{ host: string, port: number | null } | null} requested
  * @param {string[]} pool
- * @returns {{ host: string, port: number | null } | null} null when neither a
- *   pinned choice nor a pool is available, meaning "connect direct"
+ * @returns {{ host: string, port: number | null, pinned: boolean } | null} null
+ *   when neither a pinned choice nor a pool is available, meaning "connect
+ *   direct". `pinned` records whether the client asked for this specific host,
+ *   which decides whether falling back to direct is acceptable.
  */
 export function selectProxyIP(requested, pool) {
-	if (requested) return requested;
+	if (requested) return { host: requested.host, port: requested.port, pinned: true };
 	if (!pool || pool.length === 0) return null;
-	return { host: pool[Math.floor(Math.random() * pool.length)], port: null };
+	return { host: pool[Math.floor(Math.random() * pool.length)], port: null, pinned: false };
+}
+
+/**
+ * Decides where a connection actually goes.
+ *
+ * A selected proxy is the route, not a fallback. Connecting direct first and
+ * only reaching for the proxy when that returned nothing made `proxyip` inert
+ * anywhere egress is unrestricted - a GitHub Actions runner, a VPS - because
+ * the direct connection simply succeeded and the proxy was never tried. It
+ * only ever appeared to work on Workers, where Cloudflare blocks outbound
+ * connections to its own ranges.
+ *
+ * @param {{ host: string, port: number | null, pinned: boolean } | null} proxyTarget
+ * @param {string} addressRemote the destination the client asked for
+ * @param {number} portRemote the destination port
+ * @returns {{ first: { host: string, port: number }, retry: { host: string, port: number } | null }}
+ *   the first hop, and the hop to retry through if it yields no data
+ */
+export function planOutbound(proxyTarget, addressRemote, portRemote) {
+	const direct = { host: addressRemote, port: portRemote };
+	if (!proxyTarget) return { first: direct, retry: null };
+	// A proxy without its own port forwards transparently, so the destination
+	// port is preserved.
+	const viaProxy = { host: proxyTarget.host, port: proxyTarget.port || portRemote };
+	// A pinned proxy is a deliberate choice of exit IP. Quietly retrying direct
+	// would hand the user the host's own IP without saying so, so a pinned
+	// proxy that fails takes the connection down with it.
+	return { first: viaProxy, retry: proxyTarget.pinned ? null : direct };
 }
 
 /**
@@ -443,16 +473,16 @@ async function handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawCli
 		return tcpSocket;
 	}
 
+	const plan = planOutbound(proxyTarget, addressRemote, portRemote);
+
 	/**
-	 * Retries connecting to the remote address and port if the Cloudflare socket has no incoming data.
+	 * Retries through the plan's second hop when the first yields no data.
+	 * Absent for a pinned proxy, so that a failed proxy never silently becomes
+	 * a direct connection from the host's own IP.
 	 * @returns {Promise<void>} A Promise that resolves when the retry is complete.
 	 */
 	async function retry() {
-		// A pinned proxy may carry its own port; without one the original
-		// destination port is preserved, as the proxy forwards transparently.
-		const retryAddress = proxyTarget ? proxyTarget.host : addressRemote;
-		const retryPort = proxyTarget && proxyTarget.port ? proxyTarget.port : portRemote;
-		const tcpSocket = await connectAndWrite(retryAddress, retryPort)
+		const tcpSocket = await connectAndWrite(plan.retry.host, plan.retry.port)
 		tcpSocket.closed.catch(error => {
 			console.log('retry tcpSocket closed error', error);
 		}).finally(() => {
@@ -461,11 +491,25 @@ async function handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawCli
 		remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, null, log, stats);
 	}
 
-	const tcpSocket = await connectAndWrite(addressRemote, portRemote);
+	let tcpSocket;
+	try {
+		tcpSocket = await connectAndWrite(plan.first.host, plan.first.port);
+	} catch (error) {
+		// A refused or unresolvable first hop throws here, before any data could
+		// arrive, so the no-incoming-data retry below never sees it. Without
+		// this branch a dead proxy would take the whole connection down.
+		log(`first hop ${plan.first.host}:${plan.first.port} failed: ${error.message}`);
+		if (!plan.retry) {
+			safeCloseWebSocket(webSocket);
+			return;
+		}
+		await retry();
+		return;
+	}
 
 	// when remoteSocket is ready, pass to websocket
 	// remote--> ws
-	remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, retry, log, stats);
+	remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, plan.retry ? retry : null, log, stats);
 }
 
 /**
