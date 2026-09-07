@@ -1,0 +1,279 @@
+# Runs _worker.js on a hosted runner and exposes it through a named Cloudflare
+# Tunnel, as an escape hatch from the Workers free-tier CPU limits.
+#
+# The worker is a Workers-runtime module (WebSocketPair, cloudflare:sockets,
+# a .tsv Text import), so it is served by `wrangler dev` in local mode, which
+# runs the real workerd runtime. No shim, no changes to _worker.js.
+#
+# wrangler listens on 8787 and scripts/tunnel-proxy.mjs fronts it on 3000;
+# cloudflared points at the proxy. See that script for why.
+#
+# Setup, once:
+#   1. Cloudflare Zero Trust -> Networks -> Tunnels -> create a tunnel.
+#   2. Add a public hostname on it pointing at http://localhost:3000.
+#   3. Copy the tunnel token into the repo secret CLOUDFLARE_TUNNEL_TOKEN.
+#   4. Put the /list Basic-auth password in the repo secret ADMIN_PASS, and
+#      the client UUIDs in the repo secret UUID.
+name: Tunnel
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: 'How long to hold the tunnel open (1-350).'
+        required: false
+        default: '350'
+  # A hosted job is capped at 6 h, so a fresh run is started every 5 h and the
+  # concurrency guard below cancels the one it replaces. Overlap is a few
+  # seconds of two connectors on the same tunnel, which Cloudflare tolerates.
+  schedule:
+    - cron: '0 */5 * * *'
+
+permissions:
+  contents: read
+
+# Only one tunnel session at a time; a new run supersedes the running one.
+concurrency:
+  group: tunnel
+  cancel-in-progress: true
+
+env:
+  PROXY_PORT: '3000'
+  UPSTREAM_PORT: '8787'
+  # wrangler is interactive and phones home by default; neither suits CI.
+  CI: 'true'
+  WRANGLER_SEND_METRICS: 'false'
+
+jobs:
+  tunnel:
+    runs-on: ubuntu-latest
+    # The job's own ceiling, five minutes above the hold loop so the loop always
+    # gets to exit cleanly and upload its logs instead of being killed.
+    timeout-minutes: 355
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Verify secrets are configured
+        env:
+          CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
+          ADMIN_PASS: ${{ secrets.ADMIN_PASS }}
+          UUID: ${{ secrets.UUID }}
+        run: |
+          if [ -z "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
+            echo "ERR_TUNNEL_TOKEN_MISSING: set the CLOUDFLARE_TUNNEL_TOKEN repository secret." >&2
+            exit 1
+          fi
+          if [ -z "$ADMIN_PASS" ]; then
+            echo "ERR_ADMIN_PASS_MISSING: set the ADMIN_PASS repository secret; /list answers 503 without it." >&2
+            exit 1
+          fi
+          if [ -z "$UUID" ]; then
+            echo "ERR_UUID_MISSING: set the UUID repository secret; the worker answers 503 without it." >&2
+            exit 1
+          fi
+
+      - name: Write .dev.vars
+        env:
+          ADMIN_PASS: ${{ secrets.ADMIN_PASS }}
+          UUID: ${{ secrets.UUID }}
+        run: |
+          set -euo pipefail
+          # wrangler dev reads .dev.vars and it overrides [vars], so the secrets
+          # reach workerd without ever appearing in the process argument list
+          # the way `--var ADMIN_PASS:...` would.
+          umask 077
+          : > .dev.vars
+
+          # Values are double quoted: wrangler's dotenv parser treats an
+          # unquoted '#' as the start of a comment, which would silently
+          # shorten a password instead of failing. Inside quotes, backslashes
+          # and double quotes are the only characters needing escapes.
+          write_var() {
+            local escaped="${2//\\/\\\\}"
+            escaped="${escaped//\"/\\\"}"
+            printf '%s="%s"\n' "$1" "$escaped" >> .dev.vars
+          }
+          write_var ADMIN_PASS "$ADMIN_PASS"
+          write_var UUID "$UUID"
+
+      - name: Start worker
+        run: |
+          set -euo pipefail
+          # --local runs workerd via Miniflare: WebSocketPair, cloudflare:sockets
+          # connect() and the wrangler.toml Text rule for data/proxies.tsv all
+          # behave as they do on Cloudflare's edge.
+          npx wrangler dev \
+            --local \
+            --ip 127.0.0.1 \
+            --port "$UPSTREAM_PORT" \
+            > worker.log 2>&1 < /dev/null &
+          echo "WORKER_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Wait for worker to answer
+        run: |
+          set -euo pipefail
+          # /cf is the cheapest route the worker serves: no auth, no upstream
+          # fetch. It also doubles as the UUID check, since every route answers
+          # 503 until a valid UUID is configured and curl -f rejects that.
+          for _ in $(seq 1 60); do
+            if curl -fsS -o /dev/null "http://127.0.0.1:$UPSTREAM_PORT/cf"; then
+              echo "Worker is up on port $UPSTREAM_PORT."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "ERR_WORKER_START_TIMEOUT: no response on port $UPSTREAM_PORT after 120s." >&2
+          cat worker.log >&2
+          exit 1
+
+      - name: Start front proxy on port 3000
+        run: |
+          set -euo pipefail
+          node scripts/tunnel-proxy.mjs > proxy.log 2>&1 < /dev/null &
+          echo "PROXY_PID=$!" >> "$GITHUB_ENV"
+          for _ in $(seq 1 30); do
+            if curl -fsS -o /dev/null "http://127.0.0.1:$PROXY_PORT/cf"; then
+              echo "Front proxy is up on port $PROXY_PORT."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "ERR_PROXY_START_TIMEOUT: no response on port $PROXY_PORT after 30s." >&2
+          cat proxy.log >&2
+          exit 1
+
+      - name: Assert the exposed surface is what it should be
+        env:
+          ADMIN_PASS: ${{ secrets.ADMIN_PASS }}
+        run: |
+          set -euo pipefail
+          # A regression here would publish the worker's bindings, ADMIN_PASS
+          # included, to whoever finds the hostname.
+          status=$(curl -s -o /dev/null -w '%{http_code}' \
+            "http://127.0.0.1:$PROXY_PORT/cdn-cgi/local/explorer/api/local/workers")
+          if [ "$status" != "404" ]; then
+            echo "ERR_CONTROL_API_EXPOSED: /cdn-cgi/local/ answered $status through the proxy, expected 404." >&2
+            exit 1
+          fi
+          echo "Control API is blocked."
+
+          # 401 proves the secret reached workerd; 503 means /list saw no
+          # ADMIN_PASS, and 200 would mean it is not asking for credentials.
+          list_status=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PROXY_PORT/list")
+          if [ "$list_status" != "401" ]; then
+            echo "ERR_LIST_AUTH_UNEXPECTED: /list answered $list_status without credentials, expected 401." >&2
+            exit 1
+          fi
+
+          # And the whole secret has to have survived the .dev.vars round trip.
+          # A truncated password authenticates too, so only the exact value
+          # proves nothing was silently dropped on the way in.
+          admin_user=$(grep -oP '^ADMIN_USER\s*=\s*"\K[^"]+' wrangler.toml)
+          auth_status=$(curl -s -o /dev/null -w '%{http_code}' \
+            -u "$admin_user:$ADMIN_PASS" "http://127.0.0.1:$PROXY_PORT/list")
+          if [ "$auth_status" != "200" ]; then
+            echo "ERR_LIST_AUTH_REJECTED: /list answered $auth_status for the configured credentials, expected 200." >&2
+            exit 1
+          fi
+          echo "/list authenticates with the configured credentials."
+
+      - name: Install cloudflared
+        run: |
+          set -euo pipefail
+          curl -fsSL -o cloudflared.deb \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared.deb
+          cloudflared --version
+
+      - name: Start cloudflared
+        env:
+          # cloudflared reads the token from TUNNEL_TOKEN, which keeps the secret
+          # out of the process argument list.
+          TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
+        run: |
+          set -euo pipefail
+          cloudflared tunnel --no-autoupdate --loglevel info run \
+            > cloudflared.log 2>&1 < /dev/null &
+          echo "CLOUDFLARED_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Wait for tunnel to register
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 60); do
+            if grep -q "Registered tunnel connection" cloudflared.log; then
+              echo "Tunnel connected."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "ERR_TUNNEL_REGISTER_TIMEOUT: no connection registered after 120s." >&2
+          cat cloudflared.log >&2
+          exit 1
+
+      - name: Hold the session open
+        env:
+          REQUESTED_MINUTES: ${{ github.event.inputs.duration_minutes || '350' }}
+        run: |
+          set -euo pipefail
+          case "$REQUESTED_MINUTES" in
+            '' | *[!0-9]*)
+              echo "ERR_DURATION_INVALID: duration_minutes must be a whole number, got '$REQUESTED_MINUTES'." >&2
+              exit 1
+              ;;
+          esac
+          if [ "$REQUESTED_MINUTES" -lt 1 ] || [ "$REQUESTED_MINUTES" -gt 350 ]; then
+            echo "ERR_DURATION_OUT_OF_RANGE: duration_minutes must be 1-350, got $REQUESTED_MINUTES." >&2
+            exit 1
+          fi
+
+          deadline=$(( $(date +%s) + REQUESTED_MINUTES * 60 ))
+          echo "Holding the tunnel open for ${REQUESTED_MINUTES}m."
+
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            # Sitting on a dead process serves nobody; fail fast so the next
+            # scheduled run replaces this one.
+            for entry in "worker:$WORKER_PID" "proxy:$PROXY_PID" "cloudflared:$CLOUDFLARED_PID"; do
+              name="${entry%%:*}"
+              pid="${entry##*:}"
+              if ! kill -0 "$pid" 2>/dev/null; then
+                echo "ERR_PROCESS_EXITED: $name (pid $pid) died." >&2
+                exit 1
+              fi
+            done
+            remaining=$(( (deadline - $(date +%s)) / 60 ))
+            echo "[$(date -u +%H:%M:%S)] alive, ${remaining}m remaining"
+            sleep 300
+          done
+          echo "Duration reached; shutting down."
+
+      - name: Stop processes and remove secrets
+        if: always()
+        run: |
+          for pid in "${CLOUDFLARED_PID:-}" "${PROXY_PID:-}" "${WORKER_PID:-}"; do
+            if [ -n "$pid" ]; then
+              kill "$pid" 2>/dev/null || true
+            fi
+          done
+          # The runner is ephemeral, but the log artifact is uploaded from this
+          # same directory, so the file must not survive into it.
+          rm -f .dev.vars
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tunnel-logs-${{ github.run_id }}
+          path: |
+            worker.log
+            proxy.log
+            cloudflared.log
+          if-no-files-found: warn
+          retention-days: 3

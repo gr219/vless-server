@@ -1,0 +1,42 @@
+name = "vless-server" # todo
+main = "_worker.js"
+compatibility_date = "2025-02-24"
+
+# Workers Logs. Without this, console output is only visible live via
+# `wrangler tail`; with it, logs are retained and queryable in the dashboard
+# under Workers -> vless-server -> Logs.
+# head_sampling_rate is the fraction of requests logged. Drop it (0.1 = 10%)
+# if log volume becomes a cost or CPU concern on a busy worker.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[vars]
+# UUID is deliberately absent: it is the credential a client authenticates
+# with, so it belongs in a secret, not in a committed file. Set it with
+# `wrangler secret put UUID` for a Workers deploy, or in .dev.vars (git
+# ignored) for `wrangler dev`. The worker answers 503 until it is set.
+
+# Outbound relay hosts, comma separated; one is picked at random per request.
+# All entries verified alive on 2026-09-05 against speed.cloudflare.com.
+PROXYIP = "proxyip.cmliussss.net,ProxyIP.DE.CMLiussss.net,ProxyIP.US.CMLiussss.net,ProxyIP.SG.CMLiussss.net,ProxyIP.JP.CMLiussss.net,ProxyIP.KR.CMLiussss.net,ProxyIP.HK.CMLiussss.net,di.nscl.ir,proxy.farel.is-a.dev,bpb.yousef.isegaro.com,tr.diam4.ggff.net,proxyip.oracle.fxxk.dedyn.io,proxyip.leilaomi.cc.cd"
+
+DNS_RESOLVER_URL = "https://cloudflare-dns.com/dns-query"
+
+# Per-connection tunnel logging. Off by default because on the free tier a whole
+# WebSocket session shares one 10 ms CPU budget and each log line is real work.
+# Set to "true" only while diagnosing a tunnel problem.
+DEBUG = "false"
+
+# HTTP Basic username for the /list proxy browser. The matching ADMIN_PASS is
+# deliberately absent from this committed file: set it with
+# `wrangler secret put ADMIN_PASS` for a Workers deploy, or in .dev.vars (git
+# ignored) for `wrangler dev`. /list answers 503 while either is unset.
+ADMIN_USER = "admin"
+
+# data/proxies.tsv is inlined into the bundle as a string at deploy time, so the
+# proxy catalog lives in a data file instead of a 2,500-line source literal.
+[[rules]]
+type = "Text"
+globs = ["**/*.tsv"]
+fallthrough = true

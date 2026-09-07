@@ -1,0 +1,30 @@
+# Logs
+logs
+*.log
+.wrangler
+# Dependency directories
+node_modules/
+
+# Environment variables
+.env
+
+# Build output
+build/
+dist/
+
+# IDE files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Miscellaneous
+.DS_Store
+Thumbs.db
+.env
+node_modules/
+test/.generated/
+
+# Local secrets for `wrangler dev` (ADMIN_PASS); never commit.
+.dev.vars
+.dev.vars.*
