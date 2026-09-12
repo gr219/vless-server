@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadWorker } from './load-worker.mjs';
 
-const { createSocks5Parser, SOCKS5_REPLY_OK } = await loadWorker();
+const { createSocks5Parser, SOCKS5_REPLY_OK, SOCKS5_REPLY_FAIL } = await loadWorker();
 
 const CREDS = { user: 'alice', pass: 'hunter2' };
 
@@ -163,4 +163,15 @@ test('completes a handshake delivered as one coalesced chunk', () => {
 
 test('the success reply is a well-formed SOCKS5 reply with a null bound address', () => {
 	assert.deepEqual(SOCKS5_REPLY_OK, bytes(0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0));
+});
+
+// Pins the reply socks5OverWSHandler sends on the pinned-proxy failure path
+// (Correction B / Task 7): when the first hop throws and there is no retry,
+// handleTCPOutBound returns normally instead of rethrowing, so the handler
+// must recognise "no onConnected call happened" and send this byte sequence
+// itself. The `replied` branch that decides *when* to send it lives inside
+// the unexported socks5OverWSHandler and isn't reachable without a real
+// socket, so this only pins the reply's bytes, not that branch.
+test('the failure reply is a well-formed SOCKS5 reply with a null bound address', () => {
+	assert.deepEqual(SOCKS5_REPLY_FAIL, bytes(0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0));
 });

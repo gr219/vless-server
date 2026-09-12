@@ -95,6 +95,41 @@ export function parseRequestedProxyIP(requestUrl) {
 }
 
 /**
+ * Reads the inbound protocol a client asked for in its WebSocket path
+ * (`path=/?ed=2048&proxyip=<host>&proto=socks5`).
+ *
+ * The choice is explicit rather than sniffed from the first byte, so the two
+ * protocol paths never have to agree about what a leading byte means, and so
+ * routing can be tested without constructing a handshake. Anything other than
+ * the exact string `socks5` is VLESS - an unrecognised value must not silently
+ * become a different protocol.
+ *
+ * @param {string} requestUrl the full request URL
+ * @returns {'vless' | 'socks5'}
+ */
+export function parseRequestedProtocol(requestUrl) {
+	try {
+		return new URL(requestUrl).searchParams.get('proto') === 'socks5' ? 'socks5' : 'vless';
+	} catch (error) {
+		return 'vless';
+	}
+}
+
+/**
+ * Reads the SOCKS5 login from the environment. Both halves must be present:
+ * a half-configured login would otherwise authenticate against an empty
+ * string.
+ * @param {{ SOCKS_USER?: string, SOCKS_PASS?: string }} env
+ * @returns {{ user: string, pass: string } | null}
+ */
+export function readSocksCredentials(env) {
+	const user = env && env.SOCKS_USER;
+	const pass = env && env.SOCKS_PASS;
+	if (!user || !pass) return null;
+	return { user, pass };
+}
+
+/**
  * Picks the outbound proxy for one connection: the client's pinned choice when
  * it passed validation, otherwise a random host from the configured pool.
  * @param {{ host: string, port: number | null } | null} requested
@@ -277,7 +312,9 @@ export default {
 						return proxyResponse;
 				}
 			} else {
-				return await vlessOverWSHandler(request, activeProxyIPs);
+				return parseRequestedProtocol(request.url) === 'socks5'
+					? await socks5OverWSHandler(request, activeProxyIPs, env)
+					: await vlessOverWSHandler(request, activeProxyIPs);
 			}
 		} catch (err) {
 			/** @type {Error} */ let e = err;
@@ -436,6 +473,122 @@ async function vlessOverWSHandler(request, proxyIPPool) {
 }
 
 /**
+ * Handles SOCKS5 over WebSocket.
+ *
+ * The handshake is parsed by createSocks5Parser; everything after it is the
+ * same outbound machinery VLESS uses. The one structural difference is when
+ * the reply goes out: a VLESS client sends its payload with the header and the
+ * response rides back on the first downstream chunk, whereas a SOCKS5 client
+ * waits for the reply before sending anything. So the reply is written as soon
+ * as the outbound socket opens, and remoteSocketToWS gets a null header.
+ *
+ * @param {import("@cloudflare/workers-types").Request} request
+ * @param {string[]} proxyIPPool The configured proxy hosts to fall back to.
+ * @param {{ SOCKS_USER?: string, SOCKS_PASS?: string }} env
+ * @returns {Promise<Response>}
+ */
+async function socks5OverWSHandler(request, proxyIPPool, env) {
+	const proxyTarget = selectProxyIP(parseRequestedProxyIP(request.url), proxyIPPool);
+	const webSocketPair = new WebSocketPair();
+	const [client, webSocket] = Object.values(webSocketPair);
+	webSocket.accept();
+
+	const log = debugLogging
+		? (/** @type {string} */ info) => console.log(`[socks5] ${info}`)
+		: noopLog;
+	const stats = { up: 0, down: 0, started: Date.now(), logged: false };
+	const earlyDataHeader = request.headers.get('sec-websocket-protocol') || '';
+	const readableWebSocketStream = makeReadableWebSocketStream(webSocket, earlyDataHeader, log);
+
+	const parser = createSocks5Parser(readSocksCredentials(env));
+	const remoteSocketWrapper = { value: null };
+	let handshakeDone = false;
+	// Set by onConnected once handleTCPOutBound's first hop actually comes up.
+	// A pinned proxy (the every-/list-link case) that fails its first hop
+	// returns from handleTCPOutBound normally instead of throwing - see the
+	// `!plan.retry` branch there - so the catch below cannot tell success from
+	// failure on its own. This flag is the only reliable signal, and it also
+	// keeps a success from being followed by a stray failure reply.
+	let replied = false;
+
+	/** @param {Uint8Array} bytes */
+	const send = (bytes) => {
+		if (webSocket.readyState === WS_READY_STATE_OPEN) webSocket.send(bytes);
+	};
+
+	readableWebSocketStream.pipeTo(new WritableStream({
+		async write(chunk) {
+			stats.up += chunk.byteLength || 0;
+
+			// Past the handshake this is a plain byte pipe to the remote socket.
+			if (handshakeDone) {
+				if (!remoteSocketWrapper.value) return;
+				const writer = remoteSocketWrapper.value.writable.getWriter();
+				await writer.write(chunk);
+				writer.releaseLock();
+				return;
+			}
+
+			parser.push(new Uint8Array(chunk));
+			for (;;) {
+				const step = parser.next();
+				if (step.state === 'need-more') return;
+				if (step.state === 'send') {
+					send(step.bytes);
+					continue;
+				}
+				if (step.state === 'fail') {
+					log(`handshake rejected: ${step.reason}`);
+					if (step.bytes) send(step.bytes);
+					safeCloseWebSocket(webSocket);
+					return;
+				}
+				// step.state === 'connect'
+				handshakeDone = true;
+				log(`connect ${step.host}:${step.port}`);
+				try {
+					await handleTCPOutBound(
+						remoteSocketWrapper, step.host, step.port, step.rest,
+						webSocket, null, log, stats, proxyTarget,
+						() => {
+							// Guards against handleTCPOutBound's retry path calling this a
+							// second time (first hop's write fails after connecting, then
+							// the retry hop connects too): one CONNECT gets one reply.
+							if (replied) return;
+							replied = true;
+							send(SOCKS5_REPLY_OK);
+						},
+					);
+					if (!replied) {
+						// handleTCPOutBound returned without onConnected firing: the
+						// pinned-proxy first-hop-failed path (see the comment on
+						// `replied` above). The client is still waiting for its reply.
+						send(SOCKS5_REPLY_FAIL);
+						safeCloseWebSocket(webSocket);
+					}
+				} catch (error) {
+					log(`outbound failed: ${error && error.message}`);
+					if (!replied) send(SOCKS5_REPLY_FAIL);
+					safeCloseWebSocket(webSocket);
+				}
+				return;
+			}
+		},
+		close() {
+			log('client stream closed');
+		},
+		abort(reason) {
+			log(`client stream aborted: ${reason}`);
+		},
+	})).catch((error) => {
+		log(`pipeTo failed: ${error && error.stack}`);
+		safeCloseWebSocket(webSocket);
+	});
+
+	return new Response(null, { status: 101, webSocket: client });
+}
+
+/**
  * Handles outbound TCP connections.
  *
  * @param {any} remoteSocket 
@@ -447,9 +600,13 @@ async function vlessOverWSHandler(request, proxyIPPool) {
  * @param {function} log The logging function.
  * @param {{ up: number, down: number, started: number, logged: boolean }} stats Per-connection byte counters.
  * @param {{ host: string, port: number | null } | null} proxyTarget The proxy to fall back to, or null to retry direct.
+ * @param {(() => void) | null} [onConnected] Called once the outbound socket is
+ *   open, before any client data is relayed. SOCKS5 needs to answer its CONNECT
+ *   request at exactly this point; VLESS carries its response on the first
+ *   downstream chunk instead and passes nothing here.
  * @returns {Promise<void>} The remote socket.
  */
-async function handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log, stats, proxyTarget) {
+async function handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log, stats, proxyTarget, onConnected) {
 
 	/**
 	 * Connects to a given address and port and writes data to the socket.
@@ -465,6 +622,7 @@ async function handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawCli
 		});
 		remoteSocket.value = tcpSocket;
 		log(`connected to ${address}:${port}`);
+		if (onConnected) onConnected();
 		const writer = tcpSocket.writable.getWriter();
 		await writer.write(rawClientData); // first write, nomal is tls client hello
 		writer.releaseLock();
@@ -923,7 +1081,7 @@ const ed = 'Vmxlc3M=';
 export const SOCKS5_REPLY_OK = new Uint8Array([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
 
 /** General failure: the outbound connection could not be established. */
-const SOCKS5_REPLY_FAIL = new Uint8Array([0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
+export const SOCKS5_REPLY_FAIL = new Uint8Array([0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
 const SOCKS5_REPLY_BAD_COMMAND = new Uint8Array([0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
 const SOCKS5_REPLY_BAD_ADDRESS = new Uint8Array([0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
 const SOCKS5_NO_ACCEPTABLE_METHOD = new Uint8Array([0x05, 0xff]);

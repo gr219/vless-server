@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadWorker } from './load-worker.mjs';
 
-const { parseRequestedProxyIP, selectProxyIP, parseProxyIPs } = await loadWorker();
+const { parseRequestedProxyIP, selectProxyIP, parseProxyIPs, parseRequestedProtocol, readSocksCredentials } = await loadWorker();
 
 const url = (query) => `https://edge.example.com/${query}`;
 
@@ -61,4 +61,28 @@ test('selectProxyIP returns null when nothing is pinned and the pool is empty', 
 test('parseProxyIPs splits and trims the PROXYIP environment variable', () => {
 	assert.deepEqual(parseProxyIPs(' a.example.com , b.example.com ,, '), ['a.example.com', 'b.example.com']);
 	assert.deepEqual(parseProxyIPs(undefined), []);
+});
+
+test('parseRequestedProtocol defaults to vless', () => {
+	assert.equal(parseRequestedProtocol(url('?ed=2048')), 'vless');
+	assert.equal(parseRequestedProtocol(url('')), 'vless');
+	assert.equal(parseRequestedProtocol('not a url'), 'vless');
+});
+
+test('parseRequestedProtocol reads an explicit socks5 request', () => {
+	assert.equal(parseRequestedProtocol(url('?proto=socks5')), 'socks5');
+	assert.equal(parseRequestedProtocol(url('?ed=2048&proxyip=1.2.3.4:443&proto=socks5')), 'socks5');
+});
+
+test('parseRequestedProtocol treats an unknown protocol as vless', () => {
+	assert.equal(parseRequestedProtocol(url('?proto=trojan')), 'vless');
+	assert.equal(parseRequestedProtocol(url('?proto=SOCKS5')), 'vless');
+});
+
+test('readSocksCredentials returns null unless both secrets are set', () => {
+	assert.equal(readSocksCredentials({}), null);
+	assert.equal(readSocksCredentials({ SOCKS_USER: 'a' }), null);
+	assert.equal(readSocksCredentials({ SOCKS_PASS: 'b' }), null);
+	assert.equal(readSocksCredentials({ SOCKS_USER: '', SOCKS_PASS: 'b' }), null);
+	assert.deepEqual(readSocksCredentials({ SOCKS_USER: 'a', SOCKS_PASS: 'b' }), { user: 'a', pass: 'b' });
 });
