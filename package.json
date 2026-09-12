@@ -5,6 +5,8 @@
   "main": "_worker.js",
   "scripts": {
     "deploy": "wrangler deploy",
+    "predeploy": "node scripts/socks-creds.mjs",
+    "socks:rotate": "node scripts/socks-creds.mjs --rotate",
     "build": "wrangler deploy --dry-run",
     "dev": "wrangler dev --remote",
     "test": "node --test \"test/*.test.mjs\""

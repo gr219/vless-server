@@ -34,6 +34,11 @@ DEBUG = "false"
 # ignored) for `wrangler dev`. /list answers 503 while either is unset.
 ADMIN_USER = "admin"
 
+# SOCKS5 inbound credentials. Like UUID and ADMIN_PASS these are secrets, not
+# vars: `npm run deploy` generates them once via scripts/socks-creds.mjs, and
+# `npm run socks:rotate` replaces them. The worker answers every SOCKS5
+# handshake with "no acceptable method" while either is unset.
+
 # The proxy catalog is fetched live from the upstream repository rather than
 # bundled, so it stays current without a redeploy. Override the URL here to
 # point at a fork or a mirror.
