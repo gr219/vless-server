@@ -1,7 +1,5 @@
 // @ts-ignore
 import { connect } from 'cloudflare:sockets';
-// Bundled as text by the [[rules]] entry in wrangler.toml.
-import proxyCatalogText from './data/proxies.tsv';
 
 // Set per request from env.UUID; there is deliberately no built-in value,
 // because a UUID committed here is the credential and would authenticate on
@@ -213,9 +211,9 @@ export default {
 								headers: { 'Allow': 'POST', 'Content-Type': 'text/plain;charset=utf-8' },
 							});
 						}
-						return await handleMeasure(request);
+						return await handleMeasure(request, env);
 					}
-					return new Response(renderProxyListPage(userIDs, request.headers.get('Host')), {
+					return new Response(await renderProxyListPage(userIDs, request.headers.get('Host'), env), {
 						status: 200,
 						headers: {
 							'Content-Type': 'text/html; charset=utf-8',
@@ -919,16 +917,6 @@ const ed = 'Vmxlc3M=';
 // Proxy catalog
 // ---------------------------------------------------------------------------
 
-/**
- * The proxy catalog, inlined at bundle time by the `Text` rule in
- * wrangler.toml. Keeping it in data/proxies.tsv means the daily refresh is a
- * data diff instead of a 2,500-line churn through source, and hosts never have
- * to be escaped for a JavaScript string literal.
- *
- * Format and provenance are documented in the header of that file.
- */
-const PROXY_CATALOG = proxyCatalogText;
-
 /** @typedef {{ cc: string, host: string, port: number, isp: string }} ProxyEntry */
 
 /**
@@ -981,25 +969,93 @@ export function parseProxyCsv(text) {
 	return entries;
 }
 
-/** @type {ProxyEntry[] | null} */
-let cachedCatalog = null;
+/**
+ * Where the catalog comes from. The upstream repository rescans and republishes
+ * this file on its own schedule, so the worker reads it live instead of
+ * bundling a snapshot that would need a redeploy to refresh.
+ */
+const DEFAULT_CATALOG_URL =
+	'https://raw.githubusercontent.com/NiREvil/vless/refs/heads/main/sub/country_proxies/02_proxies.csv';
+
+/** Seconds a parsed catalog is reused before the upstream file is refetched. */
+const DEFAULT_CATALOG_TTL_SECONDS = 21600;
+
+/** @typedef {{ CATALOG_URL?: string, CATALOG_TTL_SECONDS?: string }} CatalogEnv */
 
 /**
- * Parses PROXY_CATALOG once per isolate.
- * @returns {ProxyEntry[]}
+ * Parsed catalog for this isolate, with the wall-clock time it was parsed.
+ * `entries` stays populated after a failed refetch: a stale catalog is a far
+ * better answer than an empty one, because the alternative is a /list page
+ * that shows nothing every time GitHub has a bad minute.
+ * @type {{ entries: ProxyEntry[], fetchedAt: number } | null}
  */
-export function getProxyCatalog() {
-	if (cachedCatalog) return cachedCatalog;
-	cachedCatalog = PROXY_CATALOG.split('\n')
-		// The file carries a `#` header, and may reach the bundler with CRLF
-		// line endings depending on how the repository was checked out.
-		.map((line) => line.replace(/\r$/, ''))
-		.filter((line) => line.length > 0 && !line.startsWith('#'))
-		.map((line) => {
-			const [cc, host, isp, latency, kind] = line.split('\t');
-			return { cc, host, isp, latency: Number(latency), kind };
-		});
-	return cachedCatalog;
+let catalogCache = null;
+
+/** Deduplicates concurrent refreshes within one isolate. @type {Promise<ProxyEntry[]> | null} */
+let catalogInFlight = null;
+
+/**
+ * Drops the isolate-level cache. Tests only - the worker has no reason to
+ * invalidate a cache whose entries expire on their own.
+ * @returns {void}
+ */
+export function __resetCatalogCacheForTests() {
+	catalogCache = null;
+	catalogInFlight = null;
+}
+
+/**
+ * The proxy catalog, fetched and parsed at most once per TTL per isolate.
+ *
+ * Three layers, cheapest first: the parsed array in module scope, then the
+ * Cache API so a cold isolate in a warm PoP does not hit GitHub, then the
+ * origin. A failure at any layer falls back to the last good parse.
+ *
+ * The tunnel data path never calls this. Routing depends on PROXYIP and on the
+ * proxyip= parameter a client pins, so an upstream outage degrades /list and
+ * /list/measure without touching anyone's traffic.
+ *
+ * @param {CatalogEnv} env
+ * @returns {Promise<ProxyEntry[]>} the catalog, or an empty array when the
+ *   first fetch of this isolate's life failed and there is nothing to serve
+ */
+export async function fetchProxyCatalog(env) {
+	const configured = Number(env.CATALOG_TTL_SECONDS);
+	const ttlSeconds = Number.isFinite(configured) && configured >= 0
+		? configured
+		: DEFAULT_CATALOG_TTL_SECONDS;
+	const fresh = catalogCache && (Date.now() - catalogCache.fetchedAt) < ttlSeconds * 1000;
+	if (fresh) return catalogCache.entries;
+	if (catalogInFlight) return catalogInFlight;
+
+	const url = env.CATALOG_URL || DEFAULT_CATALOG_URL;
+	catalogInFlight = (async () => {
+		try {
+			const response = await fetch(url, {
+				cf: { cacheTtl: ttlSeconds, cacheEverything: true },
+				headers: { 'Accept': 'text/csv, text/plain' },
+			});
+			if (!response.ok) {
+				console.log(`ERR_CATALOG_HTTP_${response.status}: ${url}`);
+				return catalogCache ? catalogCache.entries : [];
+			}
+			const entries = parseProxyCsv(await response.text());
+			if (entries.length === 0) {
+				// A parse that yields nothing means the format moved. Keeping the
+				// previous catalog is strictly better than serving an empty page.
+				console.log(`ERR_CATALOG_EMPTY: ${url} parsed to zero entries`);
+				return catalogCache ? catalogCache.entries : [];
+			}
+			catalogCache = { entries, fetchedAt: Date.now() };
+			return entries;
+		} catch (error) {
+			console.log(`ERR_CATALOG_FETCH_FAILED: ${url}: ${error && error.message}`);
+			return catalogCache ? catalogCache.entries : [];
+		} finally {
+			catalogInFlight = null;
+		}
+	})();
+	return catalogInFlight;
 }
 
 // ---------------------------------------------------------------------------
@@ -1231,9 +1287,10 @@ async function measureHost(host) {
 /**
  * Handles POST /list/measure. Body: { hosts: string[] }.
  * @param {import("@cloudflare/workers-types").Request} request
+ * @param {CatalogEnv} env
  * @returns {Promise<Response>}
  */
-async function handleMeasure(request) {
+async function handleMeasure(request, env) {
 	let body;
 	try {
 		body = await request.json();
@@ -1256,7 +1313,7 @@ async function handleMeasure(request) {
 			headers: { 'Content-Type': 'application/json;charset=utf-8' },
 		});
 	}
-	const known = new Set(getProxyCatalog().map((entry) => entry.host));
+	const known = new Set((await fetchProxyCatalog(env)).map((entry) => entry.host));
 	const targets = hosts.filter((host) => known.has(host));
 	const timings = await Promise.all(targets.map((host) => measureHost(host)));
 	/** @type {Record<string, number | null>} */
@@ -1279,7 +1336,8 @@ const COUNTRY_NAMES = {"AD": "AD", "AE": "United Arab Emirates", "AL": "Albania"
  * Renders the authenticated proxy browser served at /list.
  * @param {string[]} userIDs every configured UUID, used to populate the UUID picker
  * @param {string | null} hostName the worker hostname, used as SNI and Host in generated links
- * @returns {string} a complete HTML document
+ * @param {CatalogEnv} env
+ * @returns {Promise<string>} a complete HTML document
  */
 /**
  * Memoised /list document. The page only varies by hostname and UUID list, so
@@ -1288,10 +1346,10 @@ const COUNTRY_NAMES = {"AD": "AD", "AE": "United Arab Emirates", "AL": "Albania"
  */
 let cachedListPage = null;
 
-function renderProxyListPage(userIDs, hostName) {
+async function renderProxyListPage(userIDs, hostName, env) {
 	const cacheKey = `${hostName}|${userIDs.join(',')}`;
 	if (cachedListPage && cachedListPage.key === cacheKey) return cachedListPage.html;
-	const html = buildProxyListPage(userIDs, hostName);
+	const html = await buildProxyListPage(userIDs, hostName, env);
 	cachedListPage = { key: cacheKey, html };
 	return html;
 }
@@ -1300,15 +1358,17 @@ function renderProxyListPage(userIDs, hostName) {
  * Builds the /list document from scratch.
  * @param {string[]} userIDs
  * @param {string | null} hostName
- * @returns {string}
+ * @param {CatalogEnv} env
+ * @returns {Promise<string>}
  */
-function buildProxyListPage(userIDs, hostName) {
+async function buildProxyListPage(userIDs, hostName, env) {
+	const catalog = await fetchProxyCatalog(env);
 	const bootstrap = JSON.stringify({
 		host: hostName || '',
 		uuids: userIDs,
 		names: COUNTRY_NAMES,
 		probeSni: PROBE_SNI,
-		rows: getProxyCatalog().map((entry) => [entry.cc, entry.host, entry.isp, entry.latency, entry.kind]),
+		rows: catalog.map((entry) => [entry.cc, entry.host, entry.port, entry.isp]),
 	}).replace(/</g, '\\u003c');
 
 	return `<!DOCTYPE html>

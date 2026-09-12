@@ -44,3 +44,66 @@ test('parseProxyCsv accepts a lowercase country code by upper-casing it', () => 
 		+ '8.8.8.8,443,true,jp,N/A,-,Google,-\n';
 	assert.equal(parseProxyCsv(lower)[0].cc, 'JP');
 });
+
+const { fetchProxyCatalog, __resetCatalogCacheForTests } = await loadWorker();
+
+/**
+ * Installs a stub global fetch that answers with `bodies[n]` on call n, and
+ * records how many times it was called. A body of `null` means "reject".
+ * @param {Array<string | null>} bodies
+ * @param {number} [status]
+ */
+function stubFetch(bodies, status = 200) {
+	const calls = [];
+	globalThis.fetch = async (url) => {
+		calls.push(String(url));
+		const body = bodies[Math.min(calls.length - 1, bodies.length - 1)];
+		if (body === null) throw new Error('network down');
+		return new Response(body, { status });
+	};
+	return calls;
+}
+
+test('fetchProxyCatalog fetches, parses and caches the upstream CSV', async () => {
+	__resetCatalogCacheForTests();
+	const calls = stubFetch([fixture]);
+	const first = await fetchProxyCatalog({});
+	assert.equal(first.length, 3);
+	assert.equal(first[1].port, 8443);
+
+	// A second call inside the TTL must not touch the network again.
+	const second = await fetchProxyCatalog({});
+	assert.equal(calls.length, 1);
+	assert.deepEqual(second, first);
+});
+
+test('fetchProxyCatalog uses CATALOG_URL when it is set', async () => {
+	__resetCatalogCacheForTests();
+	const calls = stubFetch([fixture]);
+	await fetchProxyCatalog({ CATALOG_URL: 'https://example.test/other.csv' });
+	assert.equal(calls[0], 'https://example.test/other.csv');
+});
+
+test('fetchProxyCatalog keeps the last good parse when a refetch fails', async () => {
+	__resetCatalogCacheForTests();
+	stubFetch([fixture]);
+	const good = await fetchProxyCatalog({ CATALOG_TTL_SECONDS: '0' });
+	stubFetch([null]);
+	const stale = await fetchProxyCatalog({ CATALOG_TTL_SECONDS: '0' });
+	assert.deepEqual(stale, good);
+});
+
+test('fetchProxyCatalog keeps the last good parse on a non-200 response', async () => {
+	__resetCatalogCacheForTests();
+	stubFetch([fixture]);
+	const good = await fetchProxyCatalog({ CATALOG_TTL_SECONDS: '0' });
+	stubFetch(['not found'], 404);
+	const stale = await fetchProxyCatalog({ CATALOG_TTL_SECONDS: '0' });
+	assert.deepEqual(stale, good);
+});
+
+test('fetchProxyCatalog returns an empty catalog when the very first fetch fails', async () => {
+	__resetCatalogCacheForTests();
+	stubFetch([null]);
+	assert.deepEqual(await fetchProxyCatalog({}), []);
+});
