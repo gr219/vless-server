@@ -12,10 +12,12 @@ npm test
 npx wrangler deploy
 ```
 
-The proxy catalog lives in `data/proxies.tsv` and is pulled into the bundle at
-deploy time by the `Text` rule in `wrangler.toml`, so `_worker.js` is no longer
-a standalone file. A Pages deployment therefore needs a build step
-(`npx wrangler deploy`) rather than serving the repository root as-is.
+The proxy catalog is not bundled: `_worker.js` fetches it live from
+`CATALOG_URL` at request time rather than being inlined at deploy time, so it
+no longer needs a build step of its own. `npx wrangler deploy` still runs the
+`predeploy` step that provisions the SOCKS5 credentials (see
+[Secrets](#secrets)), so deploy through it rather than serving the repository
+root as-is.
 
 ## Configuration
 
@@ -31,16 +33,28 @@ variables**.
 | `ADMIN_USER` | for `/list` | HTTP Basic username for the proxy browser. |
 | `ADMIN_PASS` | for `/list` | HTTP Basic password for the proxy browser. |
 | `DEBUG` | no | `"true"` turns on per-connection tunnel logging. Off by default; see [CPU limits](#cpu-limits). |
+| `CATALOG_URL` | no | Where the proxy catalog is fetched from. Defaults to the upstream NiREvil/vless CSV; override to point at a fork or a mirror. |
+| `CATALOG_TTL_SECONDS` | no | How long a fetched catalog is reused before refetching, in seconds. Defaults to `21600` (6 hours). |
 
 ### Secrets
 
-`UUID` and `ADMIN_PASS` are credentials and are deliberately absent from
-`wrangler.toml`. The repository is public, so nothing that authenticates a
-client belongs in a committed file. `_worker.js` ships no fallback UUID: every
-route answers `503` until one is configured, and `/list` answers `503` while
-`ADMIN_USER` or `ADMIN_PASS` is unset.
+`UUID`, `ADMIN_PASS`, `SOCKS_USER` and `SOCKS_PASS` are credentials and are
+deliberately absent from `wrangler.toml`. The repository is public, so nothing
+that authenticates a client belongs in a committed file. `_worker.js` ships no
+fallback UUID: every route answers `503` until one is configured, and `/list`
+answers `503` while `ADMIN_USER` or `ADMIN_PASS` is unset. SOCKS5 answers every
+handshake with "no acceptable method" while `SOCKS_USER` or `SOCKS_PASS` is
+unset.
 
-Set them per environment:
+`SOCKS_USER`/`SOCKS_PASS` don't need setting by hand: `npm run deploy`'s
+`predeploy` step (`scripts/socks-creds.mjs`) generates them once, the first
+time it finds either missing, and otherwise leaves them alone - they're baked
+into every `socks5://` link `/list` hands out, so silently regenerating them on
+every deploy would break everything already distributed. To replace them
+deliberately, run `npm run socks:rotate`; that kills every previously
+distributed link.
+
+Set the rest per environment:
 
 ```bash
 # Workers deploy
@@ -113,44 +127,65 @@ such as the GitHub Actions host, the direct attempt simply succeeded and
 
 `<uuid>` may be any UUID listed in `UUID`, not only the first.
 
-WebSocket upgrades on any path carry the VLESS tunnel itself.
+WebSocket upgrades on any path carry a tunnel. `/sub/<uuid>` and `/bestip/<uuid>`
+are VLESS-only regardless of protocol selection.
+
+## Protocols
+
+VLESS is the default inbound protocol. A client asks for SOCKS5 instead by
+adding `proto=socks5` to the WebSocket path; anything else, including its
+absence, is VLESS.
+
+SOCKS5 requires username/password auth (RFC 1929) - `SOCKS_USER` and
+`SOCKS_PASS` (see [Secrets](#secrets)) - and the worker refuses every SOCKS5
+handshake with "no acceptable method" while either is unset.
+
+There is no standard `socks5://` URI format for a WebSocket transport, so the
+link `/list` emits is not a drop-in proxy URL:
+
+```
+socks5://user:pass@host:443?proxyip=host:port&proto=socks5#label
+```
+
+The query string is the WebSocket path a SOCKS5-speaking client must be
+configured with by hand - host, that path, and `proto=socks5` - not decoration
+on an otherwise-standard link. `/list`'s copy modal states this limitation
+wherever it hands out a SOCKS5 link.
 
 ## The proxy browser
 
-`/list` renders every entry in `data/proxies.tsv`: rotating hostnames plus
-~2,500 individual addresses across 62 countries, each verified alive when the
+`/list` renders every entry in the live catalog: rotating hostnames plus
+individual addresses across dozens of countries, each verified alive when the
 catalog was last refreshed.
+
+Columns: Country, Host, Port, ISP, Edge, Link.
 
 - Sort by any column; click the active column again to reverse it.
 - The caret on a header opens a per-column filter with its own search box.
-  Country and ISP filter by value, Host by substring, Latency by upper bound.
+  Country, ISP and Port filter by value, Host by substring.
 - The search box does a fuzzy match over country, host and ISP. Results rank by
   relevance until a column is chosen explicitly.
-- Pick a UUID to build links with; the Link column and every copy action follow
-  it.
+- Pick a protocol (VLESS or SOCKS5) and a UUID to build links with; the Link
+  column and every copy action follow both. See [Protocols](#protocols) for
+  what changes when SOCKS5 is selected.
 - Every generated link dials the worker's own hostname and pins the row's proxy
   in its path, so picking a row changes the route your traffic actually takes.
 - **Test Vinaphone** swaps that edge address for `vina.std.io.vn:443`, leaving
   the pinned proxy and the row's tag intact.
 - Copy a single link from a row, or tick rows and copy them together, either as
   plain links or as a base64 subscription.
-- Two timing columns, deliberately kept apart because they measure different
-  things and are not comparable:
-  - **Scan** - the TCP round trip recorded by whichever machine last refreshed
-    the catalog (a GitHub runner). A rough ranking hint, always present, and the
-    column the "max latency" filter applies to.
-  - **Edge** - measured on demand from the Cloudflare edge: the TCP handshake
-    plus the time to relay a TLS ClientHello for `speed.cloudflare.com` through
-    the proxy. Click **measure** in a row, or tick rows and use **Re-measure
-    selected**. Three outcomes:
-    - a time in milliseconds - the proxy connected *and* relayed;
-    - **no relay** (amber) - it accepted the connection but forwarded nothing,
-      or answered with a TLS alert. A dead proxy that still answers TCP, which
-      a handshake-only probe would have scored as healthy;
-    - **unreachable** (red) - no TCP connection at all.
+- **Edge** is the only timing figure: measured on demand from the Cloudflare
+  edge, the TCP handshake plus the time to relay a TLS ClientHello for
+  `speed.cloudflare.com` through the proxy. The upstream catalog no longer
+  carries a scan-time latency figure to show alongside it. Click **measure** in
+  a row, or tick rows and use **Re-measure selected**. Three outcomes:
+  - a time in milliseconds - the proxy connected *and* relayed;
+  - **no relay** (amber) - it accepted the connection but forwarded nothing, or
+    answered with a TLS alert. A dead proxy that still answers TCP, which a
+    handshake-only probe would have scored as healthy;
+  - **unreachable** (red) - no TCP connection at all.
 
-  Each column sorts on its own. Rows that were never probed, and rows that will
-  not relay, sort last by Edge.
+  Rows that were never probed, and rows that will not relay, sort last by Edge.
 
   The Edge probe stops at the first response record. Measuring throughput would
   mean completing the TLS handshake, and the Workers socket API ties the TLS SNI
@@ -158,27 +193,19 @@ catalog was last refreshed.
   SNI-routed proxy. A megabytes-per-second figure needs a client that speaks the
   tunnel end to end.
 
-### Refreshing the catalog
+### The catalog source
 
-Entries come from [NiREvil/vless](https://github.com/NiREvil/vless):
-[`ProxyIP.md`](https://github.com/NiREvil/vless/blob/main/sub/ProxyIP.md) for the
-rotating hostnames and
-[`ProxyIP-Daily.md`](https://github.com/NiREvil/vless/blob/main/sub/ProxyIP-Daily.md)
-for the daily scan.
+Entries come live from [NiREvil/vless](https://github.com/NiREvil/vless)'s
+per-proxy CSV, at the URL named by `CATALOG_URL`. `_worker.js` fetches it on
+demand, parses each entry's country, host, port and ISP, and caches the parsed
+result both in module scope (reused for the life of the isolate) and in the
+Cache API (shared across isolates in the same Cloudflare PoP), for
+`CATALOG_TTL_SECONDS` before refetching.
 
-```bash
-npm run catalog          # rewrite data/proxies.tsv from upstream
-npm run catalog:check    # exit 1 if it is out of date, changing nothing
-```
-
-The generator parses both files, drops anything that no longer answers on 443,
-and records each survivor's round trip as the Scan figure. It refuses to write a
-catalog that parses empty or comes back implausibly small, so an upstream layout
-change fails loudly instead of shipping a broken list.
-
-`.github/workflows/refresh-proxy-catalog.yml` runs it daily at 05:30 UTC and
-opens a pull request when the data changed. Merge it and redeploy - the catalog
-is bundled at deploy time, so a merge alone does not update the running worker.
+A failed refetch is not fatal: the worker keeps serving the last catalog it
+parsed successfully. There is one genuinely empty case - a cold isolate, no
+usable Cache API entry, and a failing fetch - which serves an empty catalog and
+shows an error banner on `/list`.
 
 ### Tests
 
@@ -187,8 +214,7 @@ npm test
 ```
 
 Node's built-in runner, no dependencies. `test/load-worker.mjs` loads
-`_worker.js` outside the Workers runtime by stubbing `cloudflare:sockets` and
-inlining the catalog that wrangler would otherwise supply.
+`_worker.js` outside the Workers runtime by stubbing `cloudflare:sockets`.
 
 ## Logging
 
@@ -221,8 +247,8 @@ What this repository does to keep the hot path cheap:
 
 - Tunnel logging is off unless `DEBUG="true"`. When off, `log()` is a shared
   no-op, so no strings are built and no I/O is queued per stream event.
-- The `/list` document is memoised per isolate, so the ~2,500 row catalog is
-  serialised once rather than on every request.
+- The `/list` document is memoised per isolate, so the catalog is serialised
+  once per hostname/UUID-list combination rather than on every request.
 
 If the errors persist after that, they are coming from the tunnel itself and no
 amount of code tuning will fix them on the free tier. The Workers Paid plan
