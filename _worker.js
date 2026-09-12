@@ -1737,6 +1737,7 @@ async function buildProxyListPage(userIDs, hostName, env) {
 		uuids: userIDs,
 		names: COUNTRY_NAMES,
 		probeSni: PROBE_SNI,
+		socks: readSocksCredentials(env),
 		rows: catalog.map((entry) => [entry.cc, entry.host, entry.port, entry.isp]),
 	}).replace(/</g, '\\u003c');
 
@@ -1775,6 +1776,12 @@ ${catalogBanner}
 			</label>
 			<label class="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">UUID
 				<select id="uuid" class="max-w-[18rem] rounded border border-slate-300 bg-white px-2 py-1.5 font-mono text-xs text-slate-900 outline-none focus:border-sky-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"></select>
+			</label>
+			<label class="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">Protocol
+				<select id="proto" class="rounded border border-slate-300 bg-white px-2 py-1.5 text-xs text-slate-900 outline-none focus:border-sky-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100">
+					<option value="vless">VLESS</option>
+					<option value="socks5">SOCKS5</option>
+				</select>
 			</label>
 			<button id="copySelected" type="button"
 				class="rounded bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-40">Copy links</button>
@@ -1852,6 +1859,7 @@ ${catalogBanner}
 	var OVERSCAN = 8;
 	var MEASURE_BATCH = 50;
 	var THEME_KEY = 'proxy-list-theme';
+	var PROTO_KEY = 'proxy-list-proto';
 	/** Address substituted into every link while "Test Vinaphone" is ticked. */
 	var VINAPHONE_ADDRESS = 'vina.std.io.vn:443';
 	var COLUMNS = [
@@ -1891,10 +1899,24 @@ ${catalogBanner}
 		scroller: pick('scroller'), spacer: pick('spacer'), counts: pick('counts'), popover: pick('popover'),
 		status: pick('status'), selectAll: pick('selectAll'), copySelected: pick('copySelected'),
 		copySub: pick('copySub'), measure: pick('measure'), theme: pick('theme'), modal: pick('modal'),
-		vinaphone: pick('vinaphone'),
+		vinaphone: pick('vinaphone'), proto: pick('proto'),
 		modalTitle: pick('modalTitle'), modalNote: pick('modalNote'), modalText: pick('modalText'),
 		modalCopy: pick('modalCopy'), modalStatus: pick('modalStatus')
 	};
+
+	if (!DATA.socks) {
+		el.proto.querySelector('option[value="socks5"]').disabled = true;
+		el.proto.title = 'SOCKS5 is unavailable: SOCKS_USER and SOCKS_PASS are not set on the worker';
+	} else {
+		var storedProto = null;
+		try { storedProto = localStorage.getItem(PROTO_KEY); } catch (error) { /* storage may be blocked */ }
+		if (storedProto === 'socks5') el.proto.value = 'socks5';
+	}
+
+	el.proto.addEventListener('change', function () {
+		try { localStorage.setItem(PROTO_KEY, el.proto.value); } catch (error) { /* storage may be blocked */ }
+		renderRows();
+	});
 
 	function flag(cc) {
 		if (cc === 'ZZ' || cc.length !== 2) return '\\uD83C\\uDF10';
@@ -1951,10 +1973,21 @@ ${catalogBanner}
 		// that parameter the worker would fall back to a random pool member and
 		// the row selection would mean nothing.
 		var address = el.vinaphone.checked ? VINAPHONE_ADDRESS : sni + ':443';
-		var path = '/?ed=2048&proxyip=' + encodeURIComponent(row.host + ':' + row.port);
+		var pin = row.host + ':' + row.port;
+		var label = encodeURIComponent(row.cc + '-' + row.host);
+
+		if (el.proto.value === 'socks5' && DATA.socks) {
+			// No standard socks5:// URI encodes a WebSocket transport, so these
+			// query parameters are not decoration: they spell out the path the
+			// client must be configured with, /?proxyip=...&proto=socks5.
+			return 'socks5://' + DATA.socks.user + ':' + DATA.socks.pass + '@' + address
+				+ '?proxyip=' + encodeURIComponent(pin) + '&proto=socks5#' + label;
+		}
+
+		var path = '/?ed=2048&proxyip=' + encodeURIComponent(pin);
 		return 'vless://' + el.uuid.value + '@' + address
 			+ '?encryption=none&security=tls&sni=' + sni + '&fp=chrome&type=ws&host=' + sni
-			+ '&path=' + encodeURIComponent(path) + '#' + encodeURIComponent(row.cc + '-' + row.host);
+			+ '&path=' + encodeURIComponent(path) + '#' + label;
 	}
 
 	function sortValue(row, key) {
@@ -2123,6 +2156,14 @@ ${catalogBanner}
 	paintThemeButton();
 
 	// --- copy modal --------------------------------------------------------
+
+	function linkNote() {
+		return el.proto.value === 'socks5' && DATA.socks
+			? 'SOCKS5: no share-URI format carries a WebSocket transport, so these links do not import as-is. '
+				+ 'Configure the client with a socks outbound over ws, host ' + DATA.host
+				+ ', and the path shown in each link\'s query string.'
+			: '';
+	}
 
 	function openModal(title, note, text) {
 		el.modalTitle.textContent = title;
@@ -2360,13 +2401,16 @@ ${catalogBanner}
 
 	el.copySelected.addEventListener('click', function () {
 		var links = selectedRows().map(linkFor);
-		openModal('VLESS links', links.length + ' selected proxy(s), one link per line', links.join('\\n'));
+		var note = links.length + ' selected proxy(s), one link per line';
+		var extra = linkNote();
+		openModal('VLESS links', extra ? note + ' - ' + extra : note, links.join('\\n'));
 	});
 
 	el.copySub.addEventListener('click', function () {
 		var links = selectedRows().map(linkFor);
-		openModal('Subscription', 'Base64 of ' + links.length + ' node(s) - paste into a client as subscription content',
-			btoa(links.join('\\n')));
+		var note = 'Base64 of ' + links.length + ' node(s) - paste into a client as subscription content';
+		var extra = linkNote();
+		openModal('Subscription', extra ? note + ' - ' + extra : note, btoa(links.join('\\n')));
 	});
 
 	pick('clearFilters').addEventListener('click', function () {
