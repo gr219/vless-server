@@ -2199,7 +2199,7 @@ ${catalogBanner}
 		return el.proto.value === 'socks5' && DATA.socks
 			? 'SOCKS5: no share-URI format carries a WebSocket transport, so these links do not import as-is. '
 				+ 'Configure the client with a socks outbound over ws, host ' + DATA.host
-				+ ', and the path shown in each link\'s query string.'
+				+ ", and the path shown in each link's query string."
 			: '';
 	}
 
