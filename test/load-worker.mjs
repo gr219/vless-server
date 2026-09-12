@@ -19,15 +19,14 @@ export async function loadWorker() {
 	if (withoutSockets === source) {
 		throw new Error('ERR_TEST_SOCKET_IMPORT_NOT_FOUND: _worker.js no longer imports cloudflare:sockets');
 	}
-	// wrangler's Text rule inlines the catalog at bundle time; plain Node cannot
-	// import a .tsv, so the same file is read and inlined here instead.
-	const catalog = await readFile(path.join(here, '..', 'data', 'proxies.tsv'), 'utf8');
-	const patched = withoutSockets.replace(
-		"import proxyCatalogText from './data/proxies.tsv';",
-		`const proxyCatalogText = ${JSON.stringify(catalog)};`,
-	);
-	if (patched === withoutSockets) {
-		throw new Error('ERR_TEST_CATALOG_IMPORT_NOT_FOUND: _worker.js no longer imports data/proxies.tsv');
+	// The catalog is fetched at runtime rather than bundled, so there is no
+	// import to rewrite. The replace is kept while data/proxies.tsv still
+	// exists so this loader works on either side of that change.
+	let patched = withoutSockets;
+	const tsvImport = "import proxyCatalogText from './data/proxies.tsv';";
+	if (patched.includes(tsvImport)) {
+		const catalog = await readFile(path.join(here, '..', 'data', 'proxies.tsv'), 'utf8');
+		patched = patched.replace(tsvImport, `const proxyCatalogText = ${JSON.stringify(catalog)};`);
 	}
 	const generated = path.join(here, '.generated');
 	await mkdir(generated, { recursive: true });

@@ -1,0 +1,10 @@
+IP Address, Port, TLS, Data Center, Region, City, ASN, latency
+172.86.77.145,443,true,AE,N/A,-,RouterHosting LLC,-
+20.174.15.226,8443,true,DE,N/A,-,Microsoft Corporation,-
+2001:db8::1,2053,true,SG,N/A,-,Example Networks,-
+1.1.1.1,443,true,ZZZ,N/A,-,Bad Country,-
+2.2.2.2,0,true,US,N/A,-,Bad Port Low,-
+3.3.3.3,70000,true,US,N/A,-,Bad Port High,-
+4.4.4.4,abc,true,US,N/A,-,Bad Port Text,-
+5.5.5.5,443,true,US,N/A,-
+,443,true,US,N/A,-,Empty Host,-

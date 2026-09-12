@@ -929,7 +929,57 @@ const ed = 'Vmxlc3M=';
  */
 const PROXY_CATALOG = proxyCatalogText;
 
-/** @typedef {{ cc: string, host: string, isp: string, latency: number, kind: string }} ProxyEntry */
+/** @typedef {{ cc: string, host: string, port: number, isp: string }} ProxyEntry */
+
+/**
+ * Column offsets in the upstream CSV:
+ * IP Address, Port, TLS, Data Center, Region, City, ASN, latency
+ *
+ * TLS, Region, City and latency are read but discarded - every current row
+ * carries `true`, `N/A`, `-` and `-` respectively, so none of them can drive
+ * a column or a filter.
+ */
+const CSV_FIELD_COUNT = 8;
+const CSV_HOST = 0;
+const CSV_PORT = 1;
+const CSV_CC = 3;
+const CSV_ISP = 6;
+
+/**
+ * Parses the upstream proxy CSV into entries, skipping its header row.
+ *
+ * A row is kept only when it is completely well formed. Anything else is
+ * dropped without comment: this file is fetched from a third-party repository
+ * on a schedule we do not control, so a format change upstream has to shrink
+ * the catalog rather than take the worker down with it.
+ *
+ * @param {string} text the raw CSV body
+ * @returns {ProxyEntry[]} every row that parsed cleanly, in file order
+ */
+export function parseProxyCsv(text) {
+	if (!text) return [];
+	/** @type {ProxyEntry[]} */
+	const entries = [];
+	const lines = text.split('\n');
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i].replace(/\r$/, '').trim();
+		if (line.length === 0) continue;
+		const fields = line.split(',').map((field) => field.trim());
+		if (fields.length !== CSV_FIELD_COUNT) continue;
+		// The header names its first column "IP Address"; no data row can.
+		if (fields[CSV_HOST] === 'IP Address') continue;
+		const host = fields[CSV_HOST];
+		if (host.length === 0) continue;
+		const cc = fields[CSV_CC].toUpperCase();
+		if (!/^[A-Z]{2}$/.test(cc)) continue;
+		const port = Number(fields[CSV_PORT]);
+		if (!Number.isInteger(port) || port < 1 || port > 65535) continue;
+		const isp = fields[CSV_ISP];
+		if (isp.length === 0) continue;
+		entries.push({ cc, host, port, isp });
+	}
+	return entries;
+}
 
 /** @type {ProxyEntry[] | null} */
 let cachedCatalog = null;
