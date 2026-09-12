@@ -622,7 +622,14 @@ async function handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawCli
 		});
 		remoteSocket.value = tcpSocket;
 		log(`connected to ${address}:${port}`);
-		if (onConnected) onConnected();
+		// connect() is lazy - it returns before the TCP handshake completes, and a
+		// dead destination only surfaces at .opened or the first write. A caller
+		// that wants to announce success (SOCKS5) must wait for .opened first, or
+		// it would tell the client the tunnel is up right before it dies.
+		if (onConnected) {
+			await tcpSocket.opened;
+			onConnected();
+		}
 		const writer = tcpSocket.writable.getWriter();
 		await writer.write(rawClientData); // first write, nomal is tls client hello
 		writer.releaseLock();
