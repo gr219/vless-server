@@ -80,11 +80,24 @@ jobs:
             echo "ERR_UUID_MISSING: set the UUID repository secret; the worker answers 503 without it." >&2
             exit 1
           fi
+          # SOCKS_USER/SOCKS_PASS are optional here, unlike the above: this
+          # tunnel path bypasses `npm run deploy`'s predeploy step (the only
+          # place scripts/socks-creds.mjs normally runs), so this repo has to
+          # carry its own copy of those secrets rather than generating them.
+          # Leaving either unset is a valid choice - the worker just answers
+          # every SOCKS5 handshake with "no acceptable method" and /list's
+          # Protocol dropdown disables SOCKS5 - so this is a warning, not a
+          # failure.
+          if [ -z "${{ secrets.SOCKS_USER }}" ] || [ -z "${{ secrets.SOCKS_PASS }}" ]; then
+            echo "::warning::SOCKS_USER/SOCKS_PASS repository secrets are not both set; this tunnel session will serve VLESS only."
+          fi
 
       - name: Write .dev.vars
         env:
           ADMIN_PASS: ${{ secrets.ADMIN_PASS }}
           UUID: ${{ secrets.UUID }}
+          SOCKS_USER: ${{ secrets.SOCKS_USER }}
+          SOCKS_PASS: ${{ secrets.SOCKS_PASS }}
         run: |
           set -euo pipefail
           # wrangler dev reads .dev.vars and it overrides [vars], so the secrets
@@ -104,6 +117,14 @@ jobs:
           }
           write_var ADMIN_PASS "$ADMIN_PASS"
           write_var UUID "$UUID"
+          # Written even when empty: an absent SOCKS_USER/SOCKS_PASS pair must
+          # read back as unset, not fall through to whatever [vars] happens to
+          # hold (there is nothing there today, but .dev.vars should not rely
+          # on that staying true).
+          if [ -n "$SOCKS_USER" ] && [ -n "$SOCKS_PASS" ]; then
+            write_var SOCKS_USER "$SOCKS_USER"
+            write_var SOCKS_PASS "$SOCKS_PASS"
+          fi
 
       - name: Start worker
         run: |
