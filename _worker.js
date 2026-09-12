@@ -1335,7 +1335,7 @@ async function handleMeasure(request, env) {
 // ---------------------------------------------------------------------------
 
 /** ISO country code to display name, for the country column and its filter. */
-const COUNTRY_NAMES = {"AD": "AD", "AE": "United Arab Emirates", "AL": "Albania", "AM": "Armenia", "AT": "Austria", "AU": "Australia", "BA": "BA", "BD": "BD", "BE": "Belgium", "BG": "Bulgaria", "BR": "Brazil", "BY": "BY", "CA": "Canada", "CH": "Switzerland", "CL": "Chile", "CO": "Colombia", "CY": "Cyprus", "CZ": "Czech Republic", "DE": "Germany", "DK": "Denmark", "DO": "DO", "EE": "Estonia", "EG": "Egypt", "ES": "Spain", "FI": "Finland", "FR": "France", "GB": "United Kingdom", "HK": "Hong Kong", "HU": "Hungary", "IE": "Ireland", "IL": "Israel", "IN": "India", "IS": "IS", "IT": "Italy", "JP": "Japan", "KG": "KG", "KR": "South Korea", "KZ": "Kazakhstan", "LT": "Lithuania", "LV": "Latvia", "MD": "Moldova", "MU": "Mauritius", "MX": "Mexico", "MY": "Malaysia", "NL": "Netherlands", "PH": "Philippines", "PL": "Poland", "RO": "Romania", "RS": "Serbia", "RU": "Russia", "SA": "Saudi Arabia", "SE": "Sweden", "SG": "Singapore", "SY": "SY", "TH": "Thailand", "TR": "Turkey", "TW": "Taiwan", "UA": "Ukraine", "US": "United States", "UZ": "Uzbekistan", "VN": "Vietnam", "ZA": "South Africa", "ZZ": "Worldwide"};
+const COUNTRY_NAMES = {"AD": "Andorra", "AE": "United Arab Emirates", "AL": "Albania", "AM": "Armenia", "AR": "Argentina", "AT": "Austria", "AU": "Australia", "AZ": "Azerbaijan", "BA": "Bosnia and Herzegovina", "BD": "Bangladesh", "BE": "Belgium", "BG": "Bulgaria", "BR": "Brazil", "BY": "Belarus", "CA": "Canada", "CH": "Switzerland", "CL": "Chile", "CN": "China", "CO": "Colombia", "CY": "Cyprus", "CZ": "Czech Republic", "DE": "Germany", "DK": "Denmark", "DO": "Dominican Republic", "EE": "Estonia", "EG": "Egypt", "ES": "Spain", "FI": "Finland", "FR": "France", "GB": "United Kingdom", "GE": "Georgia", "GR": "Greece", "HK": "Hong Kong", "HU": "Hungary", "ID": "Indonesia", "IE": "Ireland", "IL": "Israel", "IN": "India", "IS": "Iceland", "IT": "Italy", "JP": "Japan", "KG": "Kyrgyzstan", "KH": "Cambodia", "KR": "South Korea", "KZ": "Kazakhstan", "LT": "Lithuania", "LV": "Latvia", "MD": "Moldova", "MK": "North Macedonia", "MO": "Macao", "MU": "Mauritius", "MX": "Mexico", "MY": "Malaysia", "NG": "Nigeria", "NL": "Netherlands", "NO": "Norway", "NZ": "New Zealand", "PH": "Philippines", "PL": "Poland", "PT": "Portugal", "RO": "Romania", "RS": "Serbia", "RU": "Russia", "SA": "Saudi Arabia", "SE": "Sweden", "SG": "Singapore", "SI": "Slovenia", "SK": "Slovakia", "SY": "Syria", "TH": "Thailand", "TR": "Turkey", "TW": "Taiwan", "UA": "Ukraine", "US": "United States", "UZ": "Uzbekistan", "VN": "Vietnam", "ZA": "South Africa", "ZZ": "Worldwide"};
 
 /**
  * Renders the authenticated proxy browser served at /list.
@@ -1368,6 +1368,11 @@ async function renderProxyListPage(userIDs, hostName, env) {
  */
 async function buildProxyListPage(userIDs, hostName, env) {
 	const catalog = await fetchProxyCatalog(env);
+	const catalogBanner = catalog.length === 0
+		? '<div class="border-b border-amber-300 bg-amber-50 px-4 py-2 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200">'
+			+ 'ERR_CATALOG_UNAVAILABLE: the upstream proxy list could not be fetched and nothing is cached yet. Reload in a few minutes.'
+			+ '</div>'
+		: '';
 	const bootstrap = JSON.stringify({
 		host: hostName || '',
 		uuids: userIDs,
@@ -1399,6 +1404,7 @@ async function buildProxyListPage(userIDs, hostName, env) {
 <body class="h-full bg-white text-slate-800 antialiased dark:bg-slate-950 dark:text-slate-200">
 <script id="bootstrap" type="application/json">${bootstrap}</script>
 <div class="flex h-full flex-col">
+${catalogBanner}
 	<header class="border-b border-slate-200 bg-slate-50 px-4 py-3 dark:border-slate-800 dark:bg-slate-900/60">
 		<div class="flex flex-wrap items-center gap-3">
 			<h1 class="text-sm font-semibold tracking-wide text-slate-900 dark:text-slate-100">Proxy list</h1>
@@ -1436,8 +1442,8 @@ async function buildProxyListPage(userIDs, hostName, env) {
 						<th class="px-2 py-2 text-left"><input id="selectAll" type="checkbox" title="Select every visible row" class="h-4 w-4 accent-sky-500" /></th>
 						<th class="px-2 py-2 text-left" data-col="cc"></th>
 						<th class="px-2 py-2 text-left" data-col="host"></th>
+						<th class="px-2 py-2 text-left" data-col="port"></th>
 						<th class="px-2 py-2 text-left" data-col="isp"></th>
-						<th class="px-2 py-2 text-left" data-col="scan"></th>
 						<th class="px-2 py-2 text-left" data-col="edge"></th>
 						<th class="px-2 py-2 text-left" data-col="link"></th>
 						<th class="px-2 py-2 text-right uppercase tracking-wide">Action</th>
@@ -1492,30 +1498,29 @@ async function buildProxyListPage(userIDs, hostName, env) {
 	var COLUMNS = [
 		{ key: 'cc', label: 'Country', filter: 'values', hint: '' },
 		{ key: 'host', label: 'Host', filter: 'text', hint: '' },
+		{ key: 'port', label: 'Port', filter: 'values', hint: '' },
 		{ key: 'isp', label: 'ISP', filter: 'values', hint: '' },
-		{ key: 'scan', label: 'Scan', filter: 'range',
-			hint: 'TCP round trip from the GitHub runner that last refreshed the catalog - a rough ranking hint, not your latency' },
 		{ key: 'edge', label: 'Edge', filter: null,
-			hint: 'Measured on demand from the Cloudflare edge: TCP handshake plus the time to relay a TLS ClientHello through the proxy. "no relay" means it accepts connections but forwards nothing. Not comparable with Scan - different origin' },
+			hint: 'Measured on demand from the Cloudflare edge: TCP handshake plus the time to relay a TLS ClientHello through the proxy. "no relay" means it accepts connections but forwards nothing' },
 		{ key: 'link', label: 'Link', filter: null, hint: '' }
 	];
 
 	var rows = DATA.rows.map(function (r, i) {
 		var name = DATA.names[r[0]] || r[0];
 		return {
-			id: i, cc: r[0], host: r[1], isp: r[2], latency: r[3], kind: r[4],
+			id: i, cc: r[0], host: r[1], port: r[2], isp: r[3],
 			live: undefined, measuring: false, country: name, score: 0,
-			haystack: (r[0] + ' ' + name + ' ' + r[1] + ' ' + r[2] + ' ' + r[4]).toLowerCase()
+			haystack: (r[0] + ' ' + name + ' ' + r[1] + ' ' + r[2] + ' ' + r[3]).toLowerCase()
 		};
 	});
 
 	var state = {
 		query: '',
-		sortKey: 'scan',
+		sortKey: 'cc',
 		sortDir: 1,
 		sortTouched: false,
 		byRelevance: false,
-		filters: { cc: null, isp: null, host: '', latencyMax: null },
+		filters: { cc: null, isp: null, port: null, host: '' },
 		selected: {},
 		selectedCount: 0,
 		view: rows.slice()
@@ -1560,10 +1565,10 @@ async function buildProxyListPage(userIDs, hostName, env) {
 		return qi === query.length ? score : -1;
 	}
 
-	// row.latency is the catalog scan; row.live is the on-demand edge probe:
-	// undefined means never probed, null means unreachable, otherwise it is
-	// { connect, relay, ok, reason }. A host that connects but will not relay
-	// sorts with the failures - it is no more useful than an unreachable one.
+	// row.live is the on-demand edge probe: undefined means never probed, null
+	// means unreachable, otherwise it is { connect, relay, ok, reason }. A host
+	// that connects but will not relay sorts with the failures - it is no more
+	// useful than an unreachable one.
 	function edgeSortValue(row) {
 		if (!row.live || !row.live.ok) return Infinity;
 		return row.live.connect + row.live.relay;
@@ -1587,14 +1592,13 @@ async function buildProxyListPage(userIDs, hostName, env) {
 		// that parameter the worker would fall back to a random pool member and
 		// the row selection would mean nothing.
 		var address = el.vinaphone.checked ? VINAPHONE_ADDRESS : sni + ':443';
-		var path = '/?ed=2048&proxyip=' + encodeURIComponent(row.host);
+		var path = '/?ed=2048&proxyip=' + encodeURIComponent(row.host + ':' + row.port);
 		return 'vless://' + el.uuid.value + '@' + address
 			+ '?encryption=none&security=tls&sni=' + sni + '&fp=chrome&type=ws&host=' + sni
 			+ '&path=' + encodeURIComponent(path) + '#' + encodeURIComponent(row.cc + '-' + row.host);
 	}
 
 	function sortValue(row, key) {
-		if (key === 'scan') return row.latency;
 		if (key === 'edge') return edgeSortValue(row);
 		if (key === 'cc') return row.country;
 		if (key === 'link') return linkFor(row);
@@ -1611,7 +1615,7 @@ async function buildProxyListPage(userIDs, hostName, env) {
 			if (f.cc && !f.cc[row.cc]) continue;
 			if (f.isp && !f.isp[row.isp]) continue;
 			if (hostNeedle && row.host.toLowerCase().indexOf(hostNeedle) === -1) continue;
-			if (f.latencyMax !== null && row.latency > f.latencyMax) continue;
+			if (f.port && !f.port[row.port]) continue;
 			if (query) {
 				var score = fuzzy(row.haystack, query);
 				if (score < 0) continue;
@@ -1662,8 +1666,8 @@ async function buildProxyListPage(userIDs, hostName, env) {
 			var arrow = active ? (state.sortDir === 1 ? ' \\u25B2' : ' \\u25BC') : '';
 			var filtered = (col.key === 'cc' && state.filters.cc)
 				|| (col.key === 'isp' && state.filters.isp)
-				|| (col.key === 'host' && state.filters.host !== '')
-				|| (col.key === 'scan' && state.filters.latencyMax !== null);
+				|| (col.key === 'port' && state.filters.port)
+				|| (col.key === 'host' && state.filters.host !== '');
 			var html = '<div class="flex items-center gap-1">'
 				+ '<button type="button" data-sort="' + col.key + '" title="Sort by ' + esc(col.label)
 				+ (col.hint ? '. ' + esc(col.hint) : '')
@@ -1718,11 +1722,9 @@ async function buildProxyListPage(userIDs, hostName, env) {
 			html += '<tr class="hover:bg-slate-50 dark:hover:bg-slate-900/60" style="height:' + ROW_HEIGHT + 'px">'
 				+ '<td class="px-2"><input type="checkbox" data-id="' + row.id + '" class="h-4 w-4 accent-sky-500"' + checked + ' /></td>'
 				+ '<td class="truncate px-2"><span class="mr-1">' + flag(row.cc) + '</span>' + esc(row.country) + '</td>'
-				+ '<td class="truncate px-2 font-mono text-xs">' + esc(row.host)
-				+ (row.kind === 'pool' ? '<span class="ml-2 rounded bg-indigo-600/20 px-1 text-[10px] text-indigo-700 dark:text-indigo-300">pool</span>' : '')
-				+ '</td>'
+				+ '<td class="truncate px-2 font-mono text-xs">' + esc(row.host) + '</td>'
+				+ '<td class="truncate px-2 text-slate-500 dark:text-slate-400">' + esc(row.port) + '</td>'
 				+ '<td class="truncate px-2 text-slate-500 dark:text-slate-400">' + esc(row.isp) + '</td>'
-				+ '<td class="px-2 tabular-nums text-slate-500 dark:text-slate-400">' + row.latency + ' ms</td>'
 				+ '<td class="px-2">' + edgeCell + '</td>'
 				+ '<td class="px-2"><button type="button" data-copy="' + row.id + '" title="' + esc(link)
 				+ '" class="block w-full truncate text-left font-mono text-[11px] text-sky-700 hover:underline dark:text-sky-400">'
@@ -1815,14 +1817,15 @@ async function buildProxyListPage(userIDs, hostName, env) {
 				return fetch('/list/measure', {
 					method: 'POST',
 					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({ hosts: batch.map(function (row) { return row.host; }) })
+					body: JSON.stringify({ targets: batch.map(function (row) { return { host: row.host, port: row.port }; }) })
 				}).then(function (response) {
 					if (!response.ok) throw new Error('probe request failed with status ' + response.status);
 					return response.json();
 				}).then(function (payload) {
 					batch.forEach(function (row) {
 						row.measuring = false;
-						if (Object.prototype.hasOwnProperty.call(payload.results, row.host)) row.live = payload.results[row.host];
+						var live = payload.results[row.host + ':' + row.port];
+						if (live !== undefined) row.live = live;
 					});
 					done += batch.length;
 					if (targets.length > 1) showStatus('Probed ' + done + ' of ' + targets.length + ' host(s)...');
@@ -1867,19 +1870,6 @@ async function buildProxyListPage(userIDs, hostName, env) {
 			var text = pick('pf-text');
 			text.focus();
 			text.oninput = function () { state.filters.host = text.value; applyFilters(); };
-			return;
-		}
-
-		if (col.filter === 'range') {
-			el.popover.innerHTML = '<label class="mb-1 block text-[11px] uppercase tracking-wide text-slate-500">Max scan latency (ms)</label>'
-				+ '<input id="pf-range" type="number" min="0" step="50" class="' + INPUT_CLASS + '" value="'
-				+ (state.filters.latencyMax === null ? '' : state.filters.latencyMax) + '" />';
-			var range = pick('pf-range');
-			range.focus();
-			range.oninput = function () {
-				state.filters.latencyMax = range.value === '' ? null : Number(range.value);
-				applyFilters();
-			};
 			return;
 		}
 
@@ -2023,10 +2013,10 @@ async function buildProxyListPage(userIDs, hostName, env) {
 	pick('clearFilters').addEventListener('click', function () {
 		state.query = '';
 		el.search.value = '';
-		state.sortKey = 'scan';
+		state.sortKey = 'cc';
 		state.sortDir = 1;
 		state.sortTouched = false;
-		state.filters = { cc: null, isp: null, host: '', latencyMax: null };
+		state.filters = { cc: null, isp: null, port: null, host: '' };
 		state.selected = {};
 		state.selectedCount = 0;
 		el.popover.classList.add('hidden');
