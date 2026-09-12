@@ -954,7 +954,12 @@ export function createSocks5Parser(credentials) {
 	/** @type {'greeting' | 'auth' | 'request' | 'done'} */
 	let stage = 'greeting';
 
-	/** @param {Uint8Array} chunk */
+	/**
+	 * Appends WebSocket message bytes to the internal buffer. Merges the chunk
+	 * with any leftover from the previous call so the parser sees a continuous stream.
+	 * @param {Uint8Array} chunk
+	 * @returns {void}
+	 */
 	function push(chunk) {
 		if (chunk.length === 0) return;
 		const merged = new Uint8Array(buffer.length + chunk.length);
@@ -963,7 +968,12 @@ export function createSocks5Parser(credentials) {
 		buffer = merged;
 	}
 
-	/** @param {number} count drops `count` bytes from the front of the buffer */
+	/**
+	 * Removes `count` bytes from the front of the buffer after they have been
+	 * parsed, so the next call to a stage reader sees the remaining data.
+	 * @param {number} count
+	 * @returns {void}
+	 */
 	function consume(count) {
 		buffer = buffer.slice(count);
 	}
@@ -978,6 +988,12 @@ export function createSocks5Parser(credentials) {
 		return { state: 'fail', bytes, reason };
 	}
 
+	/**
+	 * Parses the SOCKS5 greeting: version byte, method count, and offered
+	 * authentication methods. Selects username/password (0x02) if offered and
+	 * credentials are configured. Leaves consumed bytes removed from buffer.
+	 * @returns {Socks5Step}
+	 */
 	function readGreeting() {
 		if (buffer.length < 2) return { state: 'need-more' };
 		if (buffer[0] !== 0x05) return fail(null, 'bad-version');
@@ -993,6 +1009,12 @@ export function createSocks5Parser(credentials) {
 		return { state: 'send', bytes: new Uint8Array([0x05, 0x02]) };
 	}
 
+	/**
+	 * Parses the RFC 1929 username/password authentication frame: version,
+	 * username length, username bytes, password length, password bytes. Validates
+	 * credentials using constant-time comparison. Leaves consumed bytes removed from buffer.
+	 * @returns {Socks5Step}
+	 */
 	function readAuth() {
 		if (buffer.length < 2) return { state: 'need-more' };
 		if (buffer[0] !== 0x01) return fail(null, 'bad-auth-version');
@@ -1014,6 +1036,13 @@ export function createSocks5Parser(credentials) {
 		return { state: 'send', bytes: new Uint8Array([0x01, 0x00]) };
 	}
 
+	/**
+	 * Parses the SOCKS5 CONNECT request: version, command, reserved byte, address type,
+	 * address (variable length), and port. Supports IPv4 (0x01), domain name (0x03),
+	 * and IPv6 (0x04). On success, returns the target host and port, plus any leftover
+	 * payload that arrived after the complete request. Leaves consumed bytes removed from buffer.
+	 * @returns {Socks5Step}
+	 */
 	function readRequest() {
 		if (buffer.length < 4) return { state: 'need-more' };
 		if (buffer[0] !== 0x05) return fail(null, 'bad-version');
