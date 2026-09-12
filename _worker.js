@@ -914,6 +914,171 @@ const pt = 'dmxlc3M=';
 const ed = 'Vmxlc3M=';
 
 // ---------------------------------------------------------------------------
+// SOCKS5 inbound (RFC 1928, RFC 1929)
+// ---------------------------------------------------------------------------
+
+/** Reply sent once the outbound connection is up. Bound address 0.0.0.0:0 is
+ * what a relay with no local address to advertise returns, and clients accept
+ * it; there is nothing more truthful we could put there. */
+export const SOCKS5_REPLY_OK = new Uint8Array([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
+
+/** General failure: the outbound connection could not be established. */
+const SOCKS5_REPLY_FAIL = new Uint8Array([0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
+const SOCKS5_REPLY_BAD_COMMAND = new Uint8Array([0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
+const SOCKS5_REPLY_BAD_ADDRESS = new Uint8Array([0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
+const SOCKS5_NO_ACCEPTABLE_METHOD = new Uint8Array([0x05, 0xff]);
+
+/**
+ * @typedef {{ state: 'need-more' }
+ *   | { state: 'send', bytes: Uint8Array }
+ *   | { state: 'connect', host: string, port: number, rest: Uint8Array }
+ *   | { state: 'fail', bytes: Uint8Array | null, reason: string }} Socks5Step
+ */
+
+/**
+ * An incremental SOCKS5 server handshake.
+ *
+ * WebSocket message boundaries have nothing to do with SOCKS5 frame
+ * boundaries: a client may split the greeting across two messages or send the
+ * greeting, the auth frame and the CONNECT request in one. So the parser
+ * buffers, and the caller drives it - push bytes, then call next() until it
+ * stops asking for more.
+ *
+ * @param {{ user: string, pass: string } | null} credentials the configured
+ *   SOCKS5 login, or null when the secrets are unset
+ * @returns {{ push(chunk: Uint8Array): void, next(): Socks5Step }}
+ */
+export function createSocks5Parser(credentials) {
+	/** @type {Uint8Array} */
+	let buffer = new Uint8Array(0);
+	/** @type {'greeting' | 'auth' | 'request' | 'done'} */
+	let stage = 'greeting';
+
+	/** @param {Uint8Array} chunk */
+	function push(chunk) {
+		if (chunk.length === 0) return;
+		const merged = new Uint8Array(buffer.length + chunk.length);
+		merged.set(buffer, 0);
+		merged.set(chunk, buffer.length);
+		buffer = merged;
+	}
+
+	/** @param {number} count drops `count` bytes from the front of the buffer */
+	function consume(count) {
+		buffer = buffer.slice(count);
+	}
+
+	/**
+	 * @param {Uint8Array | null} bytes
+	 * @param {string} reason
+	 * @returns {Socks5Step}
+	 */
+	function fail(bytes, reason) {
+		stage = 'done';
+		return { state: 'fail', bytes, reason };
+	}
+
+	function readGreeting() {
+		if (buffer.length < 2) return { state: 'need-more' };
+		if (buffer[0] !== 0x05) return fail(null, 'bad-version');
+		const methodCount = buffer[1];
+		if (buffer.length < 2 + methodCount) return { state: 'need-more' };
+		const methods = buffer.subarray(2, 2 + methodCount);
+		consume(2 + methodCount);
+		// Method 0x00 (no auth) is never selected. An unauthenticated SOCKS5
+		// endpoint on a public hostname is an open proxy within minutes.
+		if (!credentials) return fail(SOCKS5_NO_ACCEPTABLE_METHOD, 'unconfigured');
+		if (!methods.includes(0x02)) return fail(SOCKS5_NO_ACCEPTABLE_METHOD, 'no-acceptable-method');
+		stage = 'auth';
+		return { state: 'send', bytes: new Uint8Array([0x05, 0x02]) };
+	}
+
+	function readAuth() {
+		if (buffer.length < 2) return { state: 'need-more' };
+		if (buffer[0] !== 0x01) return fail(null, 'bad-auth-version');
+		const userLength = buffer[1];
+		if (buffer.length < 2 + userLength + 1) return { state: 'need-more' };
+		const passLength = buffer[2 + userLength];
+		const total = 2 + userLength + 1 + passLength;
+		if (buffer.length < total) return { state: 'need-more' };
+		const decoder = new TextDecoder();
+		const user = decoder.decode(buffer.subarray(2, 2 + userLength));
+		const pass = decoder.decode(buffer.subarray(3 + userLength, total));
+		consume(total);
+		// Both comparisons always run, so a wrong username costs the same as a
+		// wrong password.
+		const userOk = safeEqual(user, credentials.user);
+		const passOk = safeEqual(pass, credentials.pass);
+		if (!userOk || !passOk) return fail(new Uint8Array([0x01, 0x01]), 'bad-credentials');
+		stage = 'request';
+		return { state: 'send', bytes: new Uint8Array([0x01, 0x00]) };
+	}
+
+	function readRequest() {
+		if (buffer.length < 4) return { state: 'need-more' };
+		if (buffer[0] !== 0x05) return fail(null, 'bad-version');
+		const command = buffer[1];
+		const addressType = buffer[3];
+
+		let addressLength;
+		let addressStart = 4;
+		if (addressType === 0x01) {
+			addressLength = 4;
+		} else if (addressType === 0x03) {
+			if (buffer.length < 5) return { state: 'need-more' };
+			addressLength = buffer[4];
+			addressStart = 5;
+		} else if (addressType === 0x04) {
+			addressLength = 16;
+		} else {
+			return fail(SOCKS5_REPLY_BAD_ADDRESS, 'bad-address-type');
+		}
+
+		const total = addressStart + addressLength + 2;
+		if (buffer.length < total) return { state: 'need-more' };
+
+		// The command is checked only once the whole request has arrived, so the
+		// unsupported-command reply is not sent while bytes are still in flight.
+		if (command !== 0x01) {
+			consume(total);
+			return fail(SOCKS5_REPLY_BAD_COMMAND, 'unsupported-command');
+		}
+
+		const raw = buffer.subarray(addressStart, addressStart + addressLength);
+		let host;
+		if (addressType === 0x01) {
+			host = Array.from(raw).join('.');
+		} else if (addressType === 0x03) {
+			host = new TextDecoder().decode(raw);
+		} else {
+			// Unbracketed colon-hex, matching how processVlessHeader hands IPv6
+			// to connect(); the Workers socket API accepts it in that form.
+			const groups = [];
+			for (let i = 0; i < 8; i++) groups.push(((raw[i * 2] << 8) | raw[i * 2 + 1]).toString(16));
+			host = groups.join(':');
+		}
+		if (host.length === 0) return fail(SOCKS5_REPLY_BAD_ADDRESS, 'empty-address');
+
+		const port = (buffer[total - 2] << 8) | buffer[total - 1];
+		consume(total);
+		const rest = buffer;
+		buffer = new Uint8Array(0);
+		stage = 'done';
+		return { state: 'connect', host, port, rest };
+	}
+
+	/** @returns {Socks5Step} */
+	function next() {
+		if (stage === 'greeting') return readGreeting();
+		if (stage === 'auth') return readAuth();
+		if (stage === 'request') return readRequest();
+		return { state: 'need-more' };
+	}
+
+	return { push, next };
+}
+
+// ---------------------------------------------------------------------------
 // Proxy catalog
 // ---------------------------------------------------------------------------
 
