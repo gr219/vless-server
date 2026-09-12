@@ -1220,7 +1220,7 @@ export function buildClientHello(serverName) {
  */
 
 /**
- * Probes host:443 from the Cloudflare edge: TCP handshake, then a ClientHello
+ * Probes host:port from the Cloudflare edge: TCP handshake, then a ClientHello
  * for PROBE_SNI to see whether the host actually relays.
  *
  * A bare TCP handshake is not enough to call a proxy healthy - plenty of dead
@@ -1237,13 +1237,14 @@ export function buildClientHello(serverName) {
  * PoP close to the proxy. /list keeps them in separate columns for that reason.
  *
  * @param {string} host
+ * @param {number} port
  * @returns {Promise<ProbeResult | null>} null if the host is unreachable
  */
-async function measureHost(host) {
+async function measureHost(host, port) {
 	const started = Date.now();
 	let socket;
 	try {
-		socket = connect({ hostname: host, port: 443 });
+		socket = connect({ hostname: host, port });
 		await withTimeout(socket.opened, MEASURE_TIMEOUT_MS);
 		const connectMs = Date.now() - started;
 
@@ -1285,7 +1286,7 @@ async function measureHost(host) {
 }
 
 /**
- * Handles POST /list/measure. Body: { hosts: string[] }.
+ * Handles POST /list/measure. Body: { targets: Array<{ host: string, port: number }> }.
  * @param {import("@cloudflare/workers-types").Request} request
  * @param {CatalogEnv} env
  * @returns {Promise<Response>}
@@ -1300,25 +1301,29 @@ async function handleMeasure(request, env) {
 			headers: { 'Content-Type': 'application/json;charset=utf-8' },
 		});
 	}
-	const hosts = Array.isArray(body && body.hosts) ? body.hosts : null;
-	if (!hosts || hosts.length === 0) {
-		return new Response(JSON.stringify({ error: 'ERR_MEASURE_NO_HOSTS' }), {
+	const targetsIn = Array.isArray(body && body.targets) ? body.targets : null;
+	if (!targetsIn || targetsIn.length === 0) {
+		return new Response(JSON.stringify({ error: 'ERR_MEASURE_NO_TARGETS' }), {
 			status: 400,
 			headers: { 'Content-Type': 'application/json;charset=utf-8' },
 		});
 	}
-	if (hosts.length > MEASURE_BATCH_LIMIT) {
+	if (targetsIn.length > MEASURE_BATCH_LIMIT) {
 		return new Response(JSON.stringify({ error: 'ERR_MEASURE_BATCH_TOO_LARGE', limit: MEASURE_BATCH_LIMIT }), {
 			status: 400,
 			headers: { 'Content-Type': 'application/json;charset=utf-8' },
 		});
 	}
-	const known = new Set((await fetchProxyCatalog(env)).map((entry) => entry.host));
-	const targets = hosts.filter((host) => known.has(host));
-	const timings = await Promise.all(targets.map((host) => measureHost(host)));
-	/** @type {Record<string, number | null>} */
+	// Keyed on host:port, not host alone: a catalogued host must not become a
+	// lever for probing arbitrary ports on that address from Cloudflare's edge.
+	const known = new Set((await fetchProxyCatalog(env)).map((entry) => `${entry.host}:${entry.port}`));
+	const targets = targetsIn
+		.filter((target) => target && typeof target.host === 'string' && Number.isInteger(target.port))
+		.filter((target) => known.has(`${target.host}:${target.port}`));
+	const timings = await Promise.all(targets.map((target) => measureHost(target.host, target.port)));
+	/** @type {Record<string, ProbeResult | null>} */
 	const results = {};
-	targets.forEach((host, index) => { results[host] = timings[index]; });
+	targets.forEach((target, index) => { results[`${target.host}:${target.port}`] = timings[index]; });
 	return new Response(JSON.stringify({ results }), {
 		status: 200,
 		headers: { 'Content-Type': 'application/json;charset=utf-8' },
