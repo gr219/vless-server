@@ -25,7 +25,9 @@ jobs:
       - name: Unit tests
         run: npm test
 
-      # Catches a broken bundle - a bad wrangler.toml rule, or a catalog the
-      # Text import can no longer resolve - without needing an account token.
+      # Catches a broken bundle - a bad wrangler.toml rule, or a syntax error
+      # that would only surface once Cloudflare tries to build it - without
+      # needing an account token. The proxy catalog is fetched at runtime via
+      # CATALOG_URL, not bundled, so it plays no part in this check.
       - name: Bundle
         run: npx wrangler deploy --dry-run

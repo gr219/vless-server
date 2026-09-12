@@ -154,9 +154,9 @@ wherever it hands out a SOCKS5 link.
 
 ## The proxy browser
 
-`/list` renders every entry in the live catalog: rotating hostnames plus
-individual addresses across dozens of countries, each verified alive when the
-catalog was last refreshed.
+`/list` renders every entry in the live catalog: individual IP:port addresses
+across dozens of countries, each verified alive when the catalog was last
+refreshed.
 
 Columns: Country, Host, Port, ISP, Edge, Link.
 

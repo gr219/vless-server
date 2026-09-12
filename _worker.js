@@ -488,7 +488,16 @@ async function vlessOverWSHandler(request, proxyIPPool) {
  * @returns {Promise<Response>}
  */
 async function socks5OverWSHandler(request, proxyIPPool, env) {
-	const proxyTarget = selectProxyIP(parseRequestedProxyIP(request.url), proxyIPPool);
+	const selected = selectProxyIP(parseRequestedProxyIP(request.url), proxyIPPool);
+	// Force "pinned" regardless of whether the client actually pinned a
+	// proxyip=: planOutbound's non-pinned retry replays rawClientData, which for
+	// VLESS is the client's real first payload but for SOCKS5 is just
+	// step.rest (normally empty, since a SOCKS5 client waits for the 05 00
+	// reply before sending anything). An implicit direct retry here would open
+	// a second connection and replay nothing, silently losing the client's real
+	// request. Failing closed with a clean 05 01 (via the existing
+	// replied/SOCKS5_REPLY_FAIL machinery) beats a silent hang.
+	const proxyTarget = selected && { ...selected, pinned: true };
 	const webSocketPair = new WebSocketPair();
 	const [client, webSocket] = Object.values(webSocketPair);
 	webSocket.accept();
@@ -1094,6 +1103,15 @@ const SOCKS5_REPLY_BAD_ADDRESS = new Uint8Array([0x05, 0x08, 0x00, 0x01, 0, 0, 0
 const SOCKS5_NO_ACCEPTABLE_METHOD = new Uint8Array([0x05, 0xff]);
 
 /**
+ * Upper bound on bytes buffered across an incomplete handshake. A complete
+ * greeting + auth frame + CONNECT request, worst case with a 255-byte domain
+ * name, is comfortably under 600 bytes; this leaves generous headroom while
+ * still capping how much an unauthenticated client can make an isolate hold
+ * onto by never finishing its handshake.
+ */
+const SOCKS5_MAX_HANDSHAKE_BYTES = 4096;
+
+/**
  * @typedef {{ state: 'need-more' }
  *   | { state: 'send', bytes: Uint8Array }
  *   | { state: 'connect', host: string, port: number, rest: Uint8Array }
@@ -1263,6 +1281,13 @@ export function createSocks5Parser(credentials) {
 
 	/** @returns {Socks5Step} */
 	function next() {
+		// An unauthenticated client that never completes its handshake could
+		// otherwise make push() grow this buffer without bound. No reply is owed
+		// to a client misbehaving this badly, so this fails closed with no bytes
+		// - unlike every other fail() call above, which at least gets a reply.
+		if (stage !== 'done' && buffer.length > SOCKS5_MAX_HANDSHAKE_BYTES) {
+			return fail(null, 'handshake-too-large');
+		}
 		if (stage === 'greeting') return readGreeting();
 		if (stage === 'auth') return readAuth();
 		if (stage === 'request') return readRequest();
@@ -1380,7 +1405,11 @@ export function __resetCatalogCacheForTests() {
  */
 export async function fetchProxyCatalog(env) {
 	const configured = Number(env.CATALOG_TTL_SECONDS);
-	const ttlSeconds = Number.isFinite(configured) && configured >= 0
+	// Number('') is 0, which is finite and >= 0 - Cloudflare can hand an unset
+	// var to the worker as an empty string, and that must fall back to the
+	// default rather than silently meaning "refetch every request".
+	const ttlSeconds = typeof env.CATALOG_TTL_SECONDS === 'string' && env.CATALOG_TTL_SECONDS !== ''
+			&& Number.isFinite(configured) && configured >= 0
 		? configured
 		: DEFAULT_CATALOG_TTL_SECONDS;
 	const fresh = catalogCache && (Date.now() - catalogCache.fetchedAt) < ttlSeconds * 1000;
@@ -1697,24 +1726,33 @@ async function handleMeasure(request, env) {
 const COUNTRY_NAMES = {"AD": "Andorra", "AE": "United Arab Emirates", "AL": "Albania", "AM": "Armenia", "AR": "Argentina", "AT": "Austria", "AU": "Australia", "AZ": "Azerbaijan", "BA": "Bosnia and Herzegovina", "BD": "Bangladesh", "BE": "Belgium", "BG": "Bulgaria", "BR": "Brazil", "BY": "Belarus", "CA": "Canada", "CH": "Switzerland", "CL": "Chile", "CN": "China", "CO": "Colombia", "CY": "Cyprus", "CZ": "Czech Republic", "DE": "Germany", "DK": "Denmark", "DO": "Dominican Republic", "EE": "Estonia", "EG": "Egypt", "ES": "Spain", "FI": "Finland", "FR": "France", "GB": "United Kingdom", "GE": "Georgia", "GR": "Greece", "HK": "Hong Kong", "HU": "Hungary", "ID": "Indonesia", "IE": "Ireland", "IL": "Israel", "IN": "India", "IS": "Iceland", "IT": "Italy", "JP": "Japan", "KG": "Kyrgyzstan", "KH": "Cambodia", "KR": "South Korea", "KZ": "Kazakhstan", "LT": "Lithuania", "LV": "Latvia", "MD": "Moldova", "MK": "North Macedonia", "MO": "Macao", "MU": "Mauritius", "MX": "Mexico", "MY": "Malaysia", "NG": "Nigeria", "NL": "Netherlands", "NO": "Norway", "NZ": "New Zealand", "PH": "Philippines", "PL": "Poland", "PT": "Portugal", "RO": "Romania", "RS": "Serbia", "RU": "Russia", "SA": "Saudi Arabia", "SE": "Sweden", "SG": "Singapore", "SI": "Slovenia", "SK": "Slovakia", "SY": "Syria", "TH": "Thailand", "TR": "Turkey", "TW": "Taiwan", "UA": "Ukraine", "US": "United States", "UZ": "Uzbekistan", "VN": "Vietnam", "ZA": "South Africa", "ZZ": "Worldwide"};
 
 /**
+ * Memoised /list document. The page only varies by hostname, UUID list and the
+ * catalog itself, so an isolate serialises the ~2,500 row catalog once instead
+ * of on every hit. The cache key folds in the catalog's length and the wall
+ * clock time it was last (re)fetched (`catalogCache.fetchedAt`), so a refresh
+ * that changes either invalidates the memo instead of serving a stale page for
+ * the isolate's whole lifetime.
+ * @type {{ key: string, html: string } | null}
+ */
+let cachedListPage = null;
+
+/**
  * Renders the authenticated proxy browser served at /list.
  * @param {string[]} userIDs every configured UUID, used to populate the UUID picker
  * @param {string | null} hostName the worker hostname, used as SNI and Host in generated links
  * @param {CatalogEnv} env
  * @returns {Promise<string>} a complete HTML document
  */
-/**
- * Memoised /list document. The page only varies by hostname and UUID list, so
- * an isolate serialises the ~2,500 row catalog once instead of on every hit.
- * @type {{ key: string, html: string } | null}
- */
-let cachedListPage = null;
-
 async function renderProxyListPage(userIDs, hostName, env) {
-	const cacheKey = `${hostName}|${userIDs.join(',')}`;
-	if (cachedListPage && cachedListPage.key === cacheKey) return cachedListPage.html;
-	const html = await buildProxyListPage(userIDs, hostName, env);
-	cachedListPage = { key: cacheKey, html };
+	const catalog = await fetchProxyCatalog(env);
+	const cacheKey = `${hostName}|${userIDs.join(',')}|${catalog.length}|${catalogCache ? catalogCache.fetchedAt : 0}`;
+	if (catalog.length > 0 && cachedListPage && cachedListPage.key === cacheKey) return cachedListPage.html;
+	const html = await buildProxyListPage(userIDs, hostName, env, catalog);
+	// An empty catalog means either a cold isolate whose first fetch failed, or
+	// every layer of fetchProxyCatalog coming up short - never a page worth
+	// memoising, because the very next request might see a populated catalog
+	// and should render it immediately rather than waiting on this key to change.
+	if (catalog.length > 0) cachedListPage = { key: cacheKey, html };
 	return html;
 }
 
@@ -1723,10 +1761,10 @@ async function renderProxyListPage(userIDs, hostName, env) {
  * @param {string[]} userIDs
  * @param {string | null} hostName
  * @param {CatalogEnv} env
+ * @param {ProxyEntry[]} catalog the catalog already fetched by renderProxyListPage
  * @returns {Promise<string>}
  */
-async function buildProxyListPage(userIDs, hostName, env) {
-	const catalog = await fetchProxyCatalog(env);
+async function buildProxyListPage(userIDs, hostName, env, catalog) {
 	const catalogBanner = catalog.length === 0
 		? '<div class="border-b border-amber-300 bg-amber-50 px-4 py-2 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-200">'
 			+ 'ERR_CATALOG_UNAVAILABLE: the upstream proxy list could not be fetched and nothing is cached yet. Reload in a few minutes.'
@@ -1801,7 +1839,7 @@ ${catalogBanner}
 		<div class="flex h-full flex-col overflow-hidden">
 			<table class="w-full table-fixed border-collapse text-sm">
 				<colgroup>
-					<col class="w-10" /><col class="w-40" /><col class="w-52" /><col class="w-52" /><col class="w-28" /><col class="w-32" /><col /><col class="w-20" />
+					<col class="w-10" /><col class="w-40" /><col class="w-52" /><col class="w-20" /><col class="w-52" /><col class="w-32" /><col /><col class="w-20" />
 				</colgroup>
 				<thead class="bg-slate-100 text-xs text-slate-500 dark:bg-slate-900 dark:text-slate-400">
 					<tr>
@@ -1820,7 +1858,7 @@ ${catalogBanner}
 				<div id="spacer" class="relative w-full">
 					<table id="bodyTable" class="w-full table-fixed border-collapse text-sm">
 						<colgroup>
-							<col class="w-10" /><col class="w-40" /><col class="w-52" /><col class="w-52" /><col class="w-28" /><col class="w-32" /><col /><col class="w-20" />
+							<col class="w-10" /><col class="w-40" /><col class="w-52" /><col class="w-20" /><col class="w-52" /><col class="w-32" /><col /><col class="w-20" />
 						</colgroup>
 						<tbody id="rows" class="divide-y divide-slate-200 dark:divide-slate-800/70"></tbody>
 					</table>

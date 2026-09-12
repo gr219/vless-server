@@ -2,8 +2,9 @@
 # Tunnel, as an escape hatch from the Workers free-tier CPU limits.
 #
 # The worker is a Workers-runtime module (WebSocketPair, cloudflare:sockets,
-# a .tsv Text import), so it is served by `wrangler dev` in local mode, which
-# runs the real workerd runtime. No shim, no changes to _worker.js.
+# a live fetch() of the proxy catalog via CATALOG_URL), so it is served by
+# `wrangler dev` in local mode, which runs the real workerd runtime. No shim,
+# no changes to _worker.js.
 #
 # wrangler listens on 8787 and scripts/tunnel-proxy.mjs fronts it on 3000;
 # cloudflared points at the proxy. See that script for why.
@@ -108,8 +109,8 @@ jobs:
         run: |
           set -euo pipefail
           # --local runs workerd via Miniflare: WebSocketPair, cloudflare:sockets
-          # connect() and the wrangler.toml Text rule for data/proxies.tsv all
-          # behave as they do on Cloudflare's edge.
+          # connect() and the runtime fetch() of the catalog from CATALOG_URL
+          # all behave as they do on Cloudflare's edge.
           npx wrangler dev \
             --local \
             --ip 127.0.0.1 \

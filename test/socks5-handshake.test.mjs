@@ -175,3 +175,16 @@ test('the success reply is a well-formed SOCKS5 reply with a null bound address'
 test('the failure reply is a well-formed SOCKS5 reply with a null bound address', () => {
 	assert.deepEqual(SOCKS5_REPLY_FAIL, bytes(0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0));
 });
+
+test('fails closed instead of buffering an oversized handshake without limit', () => {
+	const parser = createSocks5Parser(CREDS);
+	// Content doesn't matter - an unauthenticated client that never completes
+	// its handshake should not be able to make the parser buffer forever.
+	const [step] = drive(parser, new Uint8Array(4097));
+	assert.equal(step.state, 'fail');
+	assert.equal(step.bytes, null);
+	assert.equal(step.reason, 'handshake-too-large');
+	// The parser must not keep re-parsing the truncated oversized buffer.
+	const [again] = drive(parser, bytes(0x00));
+	assert.equal(again.state, 'need-more');
+});
