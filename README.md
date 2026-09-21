@@ -90,7 +90,7 @@ path=/?ed=2048&proxyip=ProxyIP.SG.CMLiussss.net
 Every link `/list` and `/sub/<uuid>` generate carries that parameter, which is
 what makes a row's choice binding - the address in the link is always the
 worker's own edge. A connection with no `proxyip`, or with one that fails
-validation, falls back to a random host from `PROXYIP`. The value accepts a
+validation, falls back to a random host from `PROXYIP`. If `PROXYIP` is empty or unset, it falls back to the worker's own hostname. The value accepts a
 hostname, an IPv4 address or a bracketed IPv6 literal, with an optional
 `:port`.
 
