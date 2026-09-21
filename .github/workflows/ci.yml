@@ -7,8 +7,19 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 jobs:
+  cancel-tunnel:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cancel in-progress Tunnel runs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh run list -R ${{ github.repository }} --workflow=tunnel.yml --status=in_progress --json databaseId -q '.[].databaseId' | xargs -r -I {} gh run cancel {} -R ${{ github.repository }}
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -31,3 +42,14 @@ jobs:
       # CATALOG_URL, not bundled, so it plays no part in this check.
       - name: Bundle
         run: npx wrangler deploy --dry-run
+
+  trigger-tunnel:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Tunnel workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run tunnel.yml -R ${{ github.repository }}
