@@ -139,20 +139,9 @@ export function readSocksCredentials(env) {
  *   direct". `pinned` records whether the client asked for this specific host,
  *   which decides whether falling back to direct is acceptable.
  */
-export function selectProxyIP(requested, pool, requestUrl) {
+export function selectProxyIP(requested, pool) {
 	if (requested) return { host: requested.host, port: requested.port, pinned: true };
-	
-	// If no proxyip was provided and no pool is available, use the worker's own host
-	if (!pool || pool.length === 0) {
-		try {
-			const host = new URL(requestUrl).hostname;
-			if (host) return { host, port: null, pinned: false };
-		} catch (error) {
-			return null;
-		}
-		return null;
-	}
-	
+	if (!pool || pool.length === 0) return null;
 	return { host: pool[Math.floor(Math.random() * pool.length)], port: null, pinned: false };
 }
 
@@ -369,7 +358,7 @@ export async function hashHex_f(string) {
 async function vlessOverWSHandler(request, proxyIPPool) {
 	// The client pins its proxy in the WebSocket path; an absent or malformed
 	// value falls back to a random host from the pool.
-	const proxyTarget = selectProxyIP(parseRequestedProxyIP(request.url), proxyIPPool, request.url);
+	const proxyTarget = selectProxyIP(parseRequestedProxyIP(request.url), proxyIPPool);
 	const webSocketPair = new WebSocketPair();
 	const [client, webSocket] = Object.values(webSocketPair);
 	webSocket.accept();
@@ -499,7 +488,7 @@ async function vlessOverWSHandler(request, proxyIPPool) {
  * @returns {Promise<Response>}
  */
 async function socks5OverWSHandler(request, proxyIPPool, env) {
-	const selected = selectProxyIP(parseRequestedProxyIP(request.url), proxyIPPool, request.url);
+	const selected = selectProxyIP(parseRequestedProxyIP(request.url), proxyIPPool);
 	// Force "pinned" regardless of whether the client actually pinned a
 	// proxyip=: planOutbound's non-pinned retry replays rawClientData, which for
 	// VLESS is the client's real first payload but for SOCKS5 is just
