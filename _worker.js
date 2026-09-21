@@ -1820,8 +1820,12 @@ ${catalogBanner}
 			<span id="counts" class="rounded bg-slate-200 px-2 py-0.5 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-400"></span>
 			<input id="search" type="search" placeholder="Fuzzy search host, country or ISP..."
 				class="min-w-[16rem] flex-1 rounded border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-900 placeholder-slate-400 outline-none focus:border-sky-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:placeholder-slate-500" />
-			<label class="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400" title="Swap the edge address in every generated link for the Vinaphone test host; the pinned proxy is unchanged">
-				<input id="vinaphone" type="checkbox" class="h-4 w-4 accent-sky-500" />Test Vinaphone
+			<label class="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400" title="Swap the edge address in every generated link">Transport
+				<select id="transport" class="rounded border border-slate-300 bg-white px-2 py-1.5 text-xs text-slate-900 outline-none focus:border-sky-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100">
+					<option value="worker" selected>Worker's host</option>
+					<option value="vina.std.io.vn:443">Test Vinaphone</option>
+					<option value="api24-normal-alisg.tiktokv.com:443">Test Tiktok</option>
+				</select>
 			</label>
 			<label class="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">UUID
 				<select id="uuid" class="max-w-[18rem] rounded border border-slate-300 bg-white px-2 py-1.5 font-mono text-xs text-slate-900 outline-none focus:border-sky-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"></select>
@@ -1909,8 +1913,6 @@ ${catalogBanner}
 	var MEASURE_BATCH = 50;
 	var THEME_KEY = 'proxy-list-theme';
 	var PROTO_KEY = 'proxy-list-proto';
-	/** Address substituted into every link while "Test Vinaphone" is ticked. */
-	var VINAPHONE_ADDRESS = 'vina.std.io.vn:443';
 	var COLUMNS = [
 		{ key: 'cc', label: 'Country', filter: 'values', hint: '' },
 		{ key: 'host', label: 'Host', filter: 'text', hint: '' },
@@ -1948,7 +1950,7 @@ ${catalogBanner}
 		scroller: pick('scroller'), spacer: pick('spacer'), counts: pick('counts'), popover: pick('popover'),
 		status: pick('status'), selectAll: pick('selectAll'), copySelected: pick('copySelected'),
 		copySub: pick('copySub'), measure: pick('measure'), theme: pick('theme'), modal: pick('modal'),
-		vinaphone: pick('vinaphone'), proto: pick('proto'),
+		transport: pick('transport'), proto: pick('proto'),
 		modalTitle: pick('modalTitle'), modalNote: pick('modalNote'), modalText: pick('modalText'),
 		modalCopy: pick('modalCopy'), modalStatus: pick('modalStatus')
 	};
@@ -2017,11 +2019,11 @@ ${catalogBanner}
 
 	function linkFor(row) {
 		var sni = DATA.host;
-		// The client always connects to the worker's own edge; the row picks the
+		// The client always connects to the chosen edge address; the row picks the
 		// proxy the worker leaves through, pinned in the WebSocket path. Without
 		// that parameter the worker would fall back to a random pool member and
 		// the row selection would mean nothing.
-		var address = el.vinaphone.checked ? VINAPHONE_ADDRESS : sni + ':443';
+		var address = el.transport.value === 'worker' ? sni + ':443' : el.transport.value;
 		var pin = row.host + ':' + row.port;
 		var label = encodeURIComponent(row.cc + '-' + row.host);
 
@@ -2369,7 +2371,7 @@ ${catalogBanner}
 
 	el.search.addEventListener('input', function () { state.query = el.search.value; applyFilters(); });
 	el.uuid.addEventListener('change', renderRows);
-	el.vinaphone.addEventListener('change', renderRows);
+	el.transport.addEventListener('change', renderRows);
 	el.scroller.addEventListener('scroll', renderRows, { passive: true });
 	window.addEventListener('resize', renderRows);
 
