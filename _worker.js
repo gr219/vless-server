@@ -2020,11 +2020,18 @@ ${catalogBanner}
 			// No standard socks5:// URI encodes a WebSocket transport, so these
 			// query parameters are not decoration: they spell out the path the
 			// client must be configured with, /?proxyip=...&proto=socks5.
+			var socksPath = '?proto=socks5';
+			if (el.transport.value !== 'worker') {
+				socksPath += '&proxyip=' + encodeURIComponent(pin);
+			}
 			return 'socks5://' + DATA.socks.user + ':' + DATA.socks.pass + '@' + address
-				+ '?proxyip=' + encodeURIComponent(pin) + '&proto=socks5#' + label;
+				+ socksPath + '#' + label;
 		}
 
-		var path = '/?ed=2048&proxyip=' + encodeURIComponent(pin);
+		var path = '/?ed=2048';
+		if (el.transport.value !== 'worker') {
+			path += '&proxyip=' + encodeURIComponent(pin);
+		}
 		return 'vless://' + el.uuid.value + '@' + address
 			+ '?encryption=none&security=tls&sni=' + sni + '&fp=chrome&type=ws&host=' + sni
 			+ '&path=' + encodeURIComponent(path) + '#' + label;
