@@ -1,0 +1,460 @@
+# Runs vincentng295/xray_vless_ws_server (VLESS over WebSocket/xHTTP via Xray)
+# on a hosted runner, listening on port 80, and exposes it as
+# https://azr.std.io.vn through a named Cloudflare Tunnel.
+#
+# main.py would start cloudflared itself when given TUNNEL_TOKEN, but it does so
+# through a generated config.yml. Running cloudflared here instead keeps the
+# token out of the checkout and lets the hold loop watch it directly, so main.py
+# is told the tunnel is managed externally (WS_HOST set, TUNNEL_TOKEN empty).
+#
+# Setup, once:
+#   1. Cloudflare Zero Trust -> Networks -> Tunnels -> create a tunnel.
+#   2. Add a public hostname azr.std.io.vn pointing at http://localhost:80.
+#   3. Copy the tunnel token into the repo secret CLOUDFLARE_TUNNEL_TOKEN.
+#   4. Put the whole .env for main.py in the repo secret ENV_CONFIG. Leave its
+#      TUNNEL_TOKEN empty (cloudflared is run by this workflow, see above) and
+#      set XRAY_UUID and PASSWORD (the log web UI on 127.0.0.1:9999 falls back
+#      to "123" otherwise).
+#      Optional WARP_UUID in it: a second client UUID whose traffic leaves
+#      through Cloudflare WARP (see scripts/warp-route.py).
+#   5. Optional: TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID secrets, to get the
+#      vless:// links in Telegram once the tunnel is up; TELEGRAM_THREAD_ID
+#      too to post into a forum topic.
+
+name: Tunnel
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: 'How long to hold the tunnel open (1-350).'
+        required: false
+        default: '350'
+  # A hosted job is capped at 6 h, so a fresh run is started every 5 h and the
+  # concurrency guard below cancels the one it replaces. Overlap is a few
+  # seconds of two connectors on the same tunnel, which Cloudflare tolerates.
+  schedule:
+    - cron: '0 */5 * * *'
+
+permissions:
+  contents: read
+
+# Only one tunnel session at a time; a new run supersedes the running one.
+concurrency:
+  group: tunnel
+  cancel-in-progress: true
+
+env:
+  PUBLIC_HOST: azr.std.io.vn
+  # Pinned so an upstream push cannot change what runs here unreviewed.
+  UPSTREAM_REPO: https://github.com/vincentng295/xray_vless_ws_server
+  UPSTREAM_REF: cf8e18f8273f3ec850c97f5e0386f757d8736fc2
+  APP_DIR: xray_vless_ws_server
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  tunnel:
+    runs-on: ubuntu-latest
+    # The job's own ceiling, five minutes above the hold loop so the loop always
+    # gets to exit cleanly and upload its logs instead of being killed.
+    timeout-minutes: 355
+
+    steps:
+      # For scripts/ (the WARP routing pieces); the server itself is cloned below.
+      - uses: actions/checkout@v4
+
+      - name: Verify secrets are configured
+        env:
+          CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
+          ENV_CONFIG: ${{ secrets.ENV_CONFIG }}
+        run: |
+          if [ -z "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
+            echo "ERR_TUNNEL_TOKEN_MISSING: set the CLOUDFLARE_TUNNEL_TOKEN repository secret." >&2
+            exit 1
+          fi
+          if [ -z "$ENV_CONFIG" ]; then
+            echo "ERR_ENV_CONFIG_MISSING: set the ENV_CONFIG repository secret to the .env content." >&2
+            exit 1
+          fi
+
+      # Installation & Usage, step 1-2: clone the source and move into it.
+      - name: Clone xray_vless_ws_server
+        run: |
+          set -euo pipefail
+          git init -q "$APP_DIR"
+          git -C "$APP_DIR" remote add origin "$UPSTREAM_REPO"
+          git -C "$APP_DIR" fetch -q --depth 1 origin "$UPSTREAM_REF"
+          git -C "$APP_DIR" checkout -q FETCH_HEAD
+          git -C "$APP_DIR" log -1 --format='Upstream at %H (%cs) %s'
+
+      # Upstream's websocket/xhttp demux keeps create_connection's 5 s timeout on
+      # the backend socket, so any proxied connection that receives nothing for
+      # 5 s is dropped (e.g. the XHTTP download leg during a long upload).
+      - name: Patch demux idle timeout
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          set -euo pipefail
+          sed -i -E 's/^(\s*)backend_conn = socket\.create_connection\(\("127\.0\.0\.1", backend_port\), timeout=5\)$/&\n\1backend_conn.settimeout(None)/' main.py
+          if ! grep -q 'backend_conn.settimeout(None)' main.py; then
+            echo "ERR_DEMUX_PATCH_FAILED: upstream main.py no longer matches the demux patch." >&2
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Installation & Usage, step 3: install the Python dependencies.
+      - name: Install Python dependencies
+        working-directory: ${{ env.APP_DIR }}
+        run: pip install -r requirements.txt
+
+      # Fetched up front so a download failure shows up as its own step rather
+      # than somewhere inside main.py's startup output.
+      - name: Download Xray
+        working-directory: ${{ env.APP_DIR }}
+        run: python download-xray.py
+
+      - name: Write .env
+        working-directory: ${{ env.APP_DIR }}
+        env:
+          ENV_CONFIG: ${{ secrets.ENV_CONFIG }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s\n' "$ENV_CONFIG" | tr -d '\r' > .env
+
+          env_value() { grep -E "^$1=" .env | tail -1 | cut -d= -f2- || true; }
+
+          xray_uuid="$(env_value XRAY_UUID)"
+          password="$(env_value PASSWORD)"
+          if [ -z "$xray_uuid" ]; then
+            echo "ERR_XRAY_UUID_MISSING: ENV_CONFIG has no XRAY_UUID." >&2
+            exit 1
+          fi
+          if [ -z "$password" ]; then
+            echo "ERR_PASSWORD_MISSING: ENV_CONFIG has no PASSWORD; the log web UI would use \"123\"." >&2
+            exit 1
+          fi
+          if [ -n "$(env_value TUNNEL_TOKEN)" ]; then
+            echo "ERR_TUNNEL_TOKEN_IN_ENV: leave TUNNEL_TOKEN empty in ENV_CONFIG; cloudflared is run by this workflow." >&2
+            exit 1
+          fi
+          warp_uuid="$(env_value WARP_UUID)"
+          if [ -n "$warp_uuid" ] && [ "$warp_uuid" = "$xray_uuid" ]; then
+            echo "ERR_WARP_UUID_DUPLICATE: WARP_UUID must differ from XRAY_UUID." >&2
+            exit 1
+          fi
+          echo "::add-mask::$xray_uuid"
+          echo "::add-mask::$password"
+          echo "XRAY_UUID_VALUE=$xray_uuid" >> "$GITHUB_ENV"
+          if [ -n "$warp_uuid" ]; then
+            echo "::add-mask::$warp_uuid"
+            echo "WARP_UUID_VALUE=$warp_uuid" >> "$GITHUB_ENV"
+          fi
+
+          # cloudflared targets the first PORT entry, so that is what to wait on.
+          first_port="$(env_value PORT)"
+          first_port="${first_port%%,*}"
+          echo "LISTEN_PORT=${first_port##*:}" >> "$GITHUB_ENV"
+
+          # Enforce auto for XHTTP mode
+          sed -i -E 's/^XHTTP_MODE=.*/XHTTP_MODE=auto/' .env
+
+      # main.py has a single exit for every client, so WARP_UUID's route is
+      # added by an ./xray wrapper that extends config.json before Xray starts.
+      # Optional by nature: if WARP cannot be set up, the server still starts
+      # and the WARP links are simply not sent.
+      - name: Prepare WARP routing
+        if: env.WARP_UUID_VALUE != ''
+        continue-on-error: true
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          set -euo pipefail
+          python download-wgcf.py
+          # wgcf-cli prints the account's private key on success, so stdout is
+          # dropped; stderr is shown with anything key-shaped blanked out.
+          wgcf() {
+            ./wgcf-cli "$@" > /dev/null 2> wgcf.err && return 0
+            sed -E 's#[A-Za-z0-9+/]{40,}=*#<redacted>#g' wgcf.err >&2
+            return 1
+          }
+          registered=''
+          for attempt in 1 2 3 4 5; do
+            if wgcf register; then
+              registered=1
+              break
+            fi
+            echo "wgcf-cli register failed (attempt $attempt), retrying." >&2
+            rm -f wgcf.json
+            sleep $(( attempt * 5 ))
+          done
+          if [ -z "$registered" ]; then
+            echo "ERR_WARP_REGISTER_FAILED: could not register a WARP account." >&2
+            exit 1
+          fi
+          wgcf generate --xray
+          rm -f wgcf.err
+          if [ ! -s wgcf.xray.json ]; then
+            echo "ERR_WARP_GENERATE_FAILED: wgcf-cli produced no wgcf.xray.json." >&2
+            exit 1
+          fi
+          cp "$GITHUB_WORKSPACE/scripts/warp-route.py" .
+          install -m 755 "$GITHUB_WORKSPACE/scripts/xray-wrapper.sh" xray-wrapper
+          mv xray xray-core
+          mv xray-wrapper xray
+          echo "WARP_READY=1" >> "$GITHUB_ENV"
+          echo "WARP account registered; WARP_UUID clients will exit through WARP."
+
+      # Installation & Usage, step 4: start the server.
+      - name: Start server
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          set -euo pipefail
+          # Port 80 is privileged; lowering the threshold beats running the
+          # whole app as root.
+          sudo sysctl -q -w net.ipv4.ip_unprivileged_port_start=0
+          python main.py > "$GITHUB_WORKSPACE/server.log" 2>&1 < /dev/null &
+          echo "SERVER_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Wait for port 80
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 60); do
+            if (exec 3<>"/dev/tcp/127.0.0.1/$LISTEN_PORT") 2>/dev/null; then
+              echo "Server is listening on port $LISTEN_PORT."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "ERR_SERVER_START_TIMEOUT: nothing listening on port $LISTEN_PORT after 120s." >&2
+          exit 1
+
+      # Fetch a page through the WARP outbound alone, in a throwaway Xray, so a
+      # broken WARP shows up here rather than as dead links on a phone. WARP
+      # links are only sent when this passes.
+      - name: Check WARP exit
+        if: env.WARP_READY != ''
+        continue-on-error: true
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          set -euo pipefail
+          python -I - <<'PY'
+          import json
+          config = json.load(open("config.json"))
+          warp = next(o for o in config["outbounds"] if o.get("protocol") == "wireguard")
+          json.dump({
+              "log": {"loglevel": "debug"},
+              "dns": {"queryStrategy": "UseIPv4"},
+              "inbounds": [{"listen": "127.0.0.1", "port": 10808, "protocol": "socks"}],
+              "outbounds": [warp],
+          }, open("warp-check.json", "w"))
+          PY
+          ./xray-core run -c warp-check.json > warp-check.log 2>&1 &
+          check_pid=$!
+          sleep 2
+          trace=$(curl -s --max-time 30 -x socks5h://127.0.0.1:10808 https://www.cloudflare.com/cdn-cgi/trace || true)
+          kill "$check_pid" 2>/dev/null || true
+          rm -f warp-check.json
+          if ! grep -qE '^warp=(on|plus)$' <<< "$trace"; then
+            echo "ERR_WARP_EXIT_FAILED: no WARP exit; WARP links will not be sent. Xray said:" >&2
+            grep -iE 'handshake|error|fail' warp-check.log | tail -15 >&2 || true
+            echo "WARP_READY=" >> "$GITHUB_ENV"
+            exit 1
+          fi
+          echo "WARP exit works: $(grep -E '^(ip|loc)=' <<< "$trace" | tr '\n' ' ')"
+
+      - name: Install cloudflared
+        run: |
+          set -euo pipefail
+          curl -fsSL -o cloudflared.deb \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared.deb
+          cloudflared --version
+
+      - name: Start cloudflared
+        env:
+          # cloudflared reads the token from TUNNEL_TOKEN, which keeps the secret
+          # out of the process argument list.
+          TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
+        run: |
+          set -euo pipefail
+          cloudflared tunnel --no-autoupdate --loglevel info run \
+            > cloudflared.log 2>&1 < /dev/null &
+          echo "CLOUDFLARED_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Wait for tunnel to register
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 60); do
+            if grep -q "Registered tunnel connection" cloudflared.log; then
+              echo "Tunnel connected; serving https://$PUBLIC_HOST"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "ERR_TUNNEL_REGISTER_TIMEOUT: no connection registered after 120s." >&2
+          cat cloudflared.log >&2
+          exit 1
+
+      # main.py writes the vless:// links to frp_info.json at startup when the
+      # tunnel is managed externally. A failed send must not take the tunnel down.
+      - name: Send VLESS links to Telegram
+        continue-on-error: true
+        working-directory: ${{ env.APP_DIR }}
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_THREAD_ID: ${{ secrets.TELEGRAM_THREAD_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "::warning::TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID are not both set; links not sent."
+            exit 0
+          fi
+          for _ in $(seq 1 30); do
+            [ -s frp_info.json ] && break
+            sleep 2
+          done
+          if [ ! -s frp_info.json ]; then
+            echo "ERR_FRP_INFO_MISSING: main.py wrote no frp_info.json within 60s." >&2
+            exit 1
+          fi
+          python -m pip install -q segno
+
+          tg_check() {
+            if [ "$1" != "200" ]; then
+              echo "ERR_TELEGRAM_SEND_FAILED: $2 answered $1: $(jq -r '.description // empty' telegram-response.json)" >&2
+              exit 1
+            fi
+          }
+
+          # main.py only knows XRAY_UUID; each WARP link is the same link with
+          # WARP_UUID swapped in and " WARP" added to its remark.
+          warp_uuid=''
+          if [ -n "${WARP_READY:-}" ]; then warp_uuid="$WARP_UUID_VALUE"; fi
+          jq -r --arg uuid "$XRAY_UUID_VALUE" --arg warp "$warp_uuid" '
+            .payloads[] | ., (if $warp == "" then empty else (sub($uuid; $warp) + "%20WARP") end)
+          ' frp_info.json > links.txt
+
+          # Links go in <code> blocks so Telegram copies them with one tap; the
+          # body is built as JSON so nothing in a link needs shell quoting.
+          jq -R -s --arg chat "$TELEGRAM_CHAT_ID" --arg thread "$TELEGRAM_THREAD_ID" --arg run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" '{
+            chat_id: $chat,
+            parse_mode: "HTML",
+            disable_web_page_preview: true,
+            text: (
+              "<b>VLESS server is up</b>\n" + ($run | @html) + "\n\n"
+              + ([split("\n")[] | select(. != "") | "<code>" + @html + "</code>"] | join("\n\n"))
+            )
+          } + (if $thread == "" then {} else {message_thread_id: ($thread | tonumber)} end)' links.txt > telegram.json
+          status=$(curl -s -o telegram-response.json -w '%{http_code}' \
+            -H 'Content-Type: application/json' --data @telegram.json \
+            "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage")
+          rm -f telegram.json
+          tg_check "$status" sendMessage
+
+          # Then one QR code per link, captioned with its remark and the link.
+          thread_args=()
+          if [ -n "$TELEGRAM_THREAD_ID" ]; then
+            thread_args=(--form-string "message_thread_id=$TELEGRAM_THREAD_ID")
+          fi
+          while IFS= read -r link; do
+            segno --scale 10 --border 4 --output qr.png "$link"
+            caption=$(python -I -c 'import html, sys, urllib.parse
+          link = sys.argv[1]
+          remark = urllib.parse.unquote(link.split("#", 1)[1]) if "#" in link else "VLESS"
+          print(f"<b>{html.escape(remark)}</b>\n<code>{html.escape(link)}</code>")' "$link")
+            status=$(curl -s -o telegram-response.json -w '%{http_code}' \
+              --form-string "chat_id=$TELEGRAM_CHAT_ID" \
+              "${thread_args[@]}" \
+              --form-string "parse_mode=HTML" \
+              --form-string "caption=$caption" \
+              -F "photo=@qr.png;type=image/png" \
+              "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendPhoto")
+            tg_check "$status" sendPhoto
+          done < links.txt
+          rm -f qr.png links.txt
+          echo "Links and QR codes sent to Telegram."
+
+      - name: Hold the session open
+        env:
+          REQUESTED_MINUTES: ${{ github.event.inputs.duration_minutes || '350' }}
+        run: |
+          set -euo pipefail
+          case "$REQUESTED_MINUTES" in
+            '' | *[!0-9]*)
+              echo "ERR_DURATION_INVALID: duration_minutes must be a whole number, got '$REQUESTED_MINUTES'." >&2
+              exit 1
+              ;;
+          esac
+          if [ "$REQUESTED_MINUTES" -lt 1 ] || [ "$REQUESTED_MINUTES" -gt 350 ]; then
+            echo "ERR_DURATION_OUT_OF_RANGE: duration_minutes must be 1-350, got $REQUESTED_MINUTES." >&2
+            exit 1
+          fi
+
+          # On cancel (a newer run or a push), the runner signals this shell.
+          # Stop the server and connector right away so the tunnel only
+          # reaches the new run, instead of lingering until the runner
+          # escalates to SIGKILL.
+          sleep_pid=''
+          on_cancel() {
+            echo "Cancelled; stopping cloudflared and the server now."
+            kill "$CLOUDFLARED_PID" "$SERVER_PID" ${sleep_pid:+"$sleep_pid"} 2>/dev/null || true
+            exit 1
+          }
+          trap on_cancel INT TERM
+
+          deadline=$(( $(date +%s) + REQUESTED_MINUTES * 60 ))
+          echo "Holding the tunnel open for ${REQUESTED_MINUTES}m."
+
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            # Sitting on a dead process serves nobody; fail fast so the next
+            # scheduled run replaces this one.
+            for entry in "server:$SERVER_PID" "cloudflared:$CLOUDFLARED_PID"; do
+              name="${entry%%:*}"
+              pid="${entry##*:}"
+              if ! kill -0 "$pid" 2>/dev/null; then
+                echo "ERR_PROCESS_EXITED: $name (pid $pid) died." >&2
+                exit 1
+              fi
+            done
+            remaining=$(( (deadline - $(date +%s)) / 60 ))
+            echo "[$(date -u +%H:%M:%S)] alive, ${remaining}m remaining"
+            # Backgrounded and waited on: bash only runs a trap once the
+            # foreground command returns, and `wait` returns at once on a signal.
+            sleep 300 &
+            sleep_pid=$!
+            wait "$sleep_pid" || true
+            sleep_pid=''
+          done
+          echo "Duration reached; shutting down."
+
+      - name: Stop processes and scrub secrets
+        if: always()
+        run: |
+          for pid in "${CLOUDFLARED_PID:-}" "${SERVER_PID:-}"; do
+            if [ -n "$pid" ]; then
+              kill "$pid" 2>/dev/null || true
+            fi
+          done
+          # The repo is public, so its artifacts are too. main.py prints full
+          # vless:// links (UUID included) to server.log; redact before upload.
+          for id in "${XRAY_UUID_VALUE:-}" "${WARP_UUID_VALUE:-}"; do
+            if [ -f server.log ] && [ -n "$id" ]; then
+              sed -i "s/$id/<redacted-uuid>/g" server.log
+            fi
+          done
+          rm -f "$APP_DIR/.env" "$APP_DIR/frp_info.json" "$APP_DIR/frp_info.config" "$APP_DIR/config.json" \
+            "$APP_DIR"/wgcf*.json
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tunnel-logs-${{ github.run_id }}
+          path: |
+            server.log
+            cloudflared.log
+          if-no-files-found: warn
+          retention-days: 3

@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  cancel-tunnel:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cancel in-progress Tunnel runs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh run list -R ${{ github.repository }} --workflow=tunnel.yml --status=in_progress --json databaseId -q '.[].databaseId' | xargs -r -I {} gh run cancel {} -R ${{ github.repository }}
+
+  trigger-tunnel:
+    needs: cancel-tunnel
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Tunnel workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run tunnel.yml -R ${{ github.repository }}
