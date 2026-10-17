@@ -115,6 +115,18 @@ jobs:
         working-directory: ${{ env.APP_DIR }}
         run: python download-xray.py
 
+      # main.py writes config.json and runs ./xray straight away, so ./xray is
+      # swapped for a wrapper that extends the config first: the stats /stats
+      # reads (always) and the WARP route (when prepared below).
+      - name: Install Xray wrapper
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          set -euo pipefail
+          cp "$GITHUB_WORKSPACE/scripts/xray-stats.py" .
+          install -m 755 "$GITHUB_WORKSPACE/scripts/xray-wrapper.sh" xray-wrapper
+          mv xray xray-core
+          mv xray-wrapper xray
+
       - name: Write .env
         working-directory: ${{ env.APP_DIR }}
         env:
@@ -162,7 +174,7 @@ jobs:
           sed -i -E 's/^XHTTP_MODE=.*/XHTTP_MODE=auto/' .env
 
       # main.py has a single exit for every client, so WARP_UUID's route is
-      # added by an ./xray wrapper that extends config.json before Xray starts.
+      # added by the ./xray wrapper, which runs warp-route.py once it is here.
       # Optional by nature: if WARP cannot be set up, the server still starts
       # and the WARP links are simply not sent.
       - name: Prepare WARP routing
@@ -200,9 +212,6 @@ jobs:
             exit 1
           fi
           cp "$GITHUB_WORKSPACE/scripts/warp-route.py" .
-          install -m 755 "$GITHUB_WORKSPACE/scripts/xray-wrapper.sh" xray-wrapper
-          mv xray xray-core
-          mv xray-wrapper xray
           echo "WARP_READY=1" >> "$GITHUB_ENV"
           echo "WARP account registered; WARP_UUID clients will exit through WARP."
 
@@ -346,6 +355,7 @@ jobs:
             text: (
               "<b>VLESS server is up</b>\n" + ($run | @html) + "\n\n"
               + ([split("\n")[] | select(. != "") | "<code>" + @html + "</code>"] | join("\n\n"))
+              + "\n\nSend /stats to see who is connected."
             )
           } + (if $thread == "" then {} else {message_thread_id: ($thread | tonumber)} end)' links.txt > telegram.json
           status=$(curl -s -o telegram-response.json -w '%{http_code}' \
@@ -380,6 +390,9 @@ jobs:
       - name: Hold the session open
         env:
           REQUESTED_MINUTES: ${{ github.event.inputs.duration_minutes || '350' }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           case "$REQUESTED_MINUTES" in
@@ -398,15 +411,28 @@ jobs:
           # reaches the new run, instead of lingering until the runner
           # escalates to SIGKILL.
           sleep_pid=''
+          bot_pid=''
           on_cancel() {
             echo "Cancelled; stopping cloudflared and the server now."
-            kill "$CLOUDFLARED_PID" "$SERVER_PID" ${sleep_pid:+"$sleep_pid"} 2>/dev/null || true
+            kill "$CLOUDFLARED_PID" "$SERVER_PID" ${bot_pid:+"$bot_pid"} ${sleep_pid:+"$sleep_pid"} 2>/dev/null || true
             exit 1
           }
           trap on_cancel INT TERM
 
           deadline=$(( $(date +%s) + REQUESTED_MINUTES * 60 ))
           echo "Holding the tunnel open for ${REQUESTED_MINUTES}m."
+
+          # /stats in the Telegram chat; optional, so it never fails the run.
+          if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+            HOLD_DEADLINE="$deadline" python -I "$GITHUB_WORKSPACE/scripts/telegram-stats-bot.py" \
+              --xray "$APP_DIR/xray-core" --config "$APP_DIR/config.json" \
+              > stats-bot.log 2>&1 < /dev/null &
+            bot_pid=$!
+            echo "STATS_BOT_PID=$bot_pid" >> "$GITHUB_ENV"
+            echo "Telegram /stats bot started."
+          else
+            echo "::warning::TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID are not both set; /stats is off."
+          fi
 
           while [ "$(date +%s)" -lt "$deadline" ]; do
             # Sitting on a dead process serves nobody; fail fast so the next
@@ -419,6 +445,11 @@ jobs:
                 exit 1
               fi
             done
+            if [ -n "$bot_pid" ] && ! kill -0 "$bot_pid" 2>/dev/null; then
+              echo "::warning::ERR_STATS_BOT_EXITED: the /stats bot died; the tunnel stays up. Last log lines:"
+              tail -5 stats-bot.log || true
+              bot_pid=''
+            fi
             remaining=$(( (deadline - $(date +%s)) / 60 ))
             echo "[$(date -u +%H:%M:%S)] alive, ${remaining}m remaining"
             # Backgrounded and waited on: bash only runs a trap once the
@@ -433,7 +464,7 @@ jobs:
       - name: Stop processes and scrub secrets
         if: always()
         run: |
-          for pid in "${CLOUDFLARED_PID:-}" "${SERVER_PID:-}"; do
+          for pid in "${STATS_BOT_PID:-}" "${CLOUDFLARED_PID:-}" "${SERVER_PID:-}"; do
             if [ -n "$pid" ]; then
               kill "$pid" 2>/dev/null || true
             fi
@@ -456,5 +487,6 @@ jobs:
           path: |
             server.log
             cloudflared.log
+            stats-bot.log
           if-no-files-found: warn
           retention-days: 3
