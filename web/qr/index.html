@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>VLESS QR</title>
+  <script src="https://cdn.tailwindcss.com/3.4.16"></script>
+  <script>
+    // Dark mode follows the toggle, not the OS; dark unless the viewer chose light.
+    tailwind.config = { darkMode: 'class' };
+    let theme = null;
+    try {
+      theme = localStorage.getItem('qr-theme');
+    } catch (_) { /* Storage blocked: use the default. */ }
+    document.documentElement.classList.toggle('dark', theme !== 'light');
+  </script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+  <!-- Relative paths: the page is at / locally and under /qr/ through the tunnel.
+       scripts/qr_web.py fills in __ASSET_VERSION__ (a hash of the scripts), so a
+       browser or Cloudflare copy cached for hours is bypassed after a change. -->
+  <script src="vless.js?v=__ASSET_VERSION__"></script>
+  <script src="app.js?v=__ASSET_VERSION__" defer></script>
+</head>
+<body class="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
+  <main class="mx-auto max-w-6xl px-4 py-8 space-y-6">
+    <header class="flex items-start justify-between gap-4">
+      <div>
+        <h1 class="text-2xl font-semibold">VLESS QR</h1>
+        <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
+          Paste one or more VLESS links copied from 3x-ui. Pick a server to swap the address, rename each profile, then scan, save or copy its QR code.
+        </p>
+      </div>
+      <button id="theme-toggle" type="button"
+        class="shrink-0 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium shadow-sm hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:hover:bg-slate-800">
+        <span class="dark:hidden">🌙 Dark</span>
+        <span class="hidden dark:inline">☀️ Light</span>
+      </button>
+    </header>
+
+    <section class="grid gap-4 md:grid-cols-[1fr_16rem]">
+      <label class="block">
+        <span class="text-sm font-medium">VLESS URIs</span>
+        <textarea id="uris" rows="6" spellcheck="false" autocomplete="off"
+          placeholder="vless://uuid@host:port?type=xhttp&amp;path=%2F#Label"
+          class="mt-1 block w-full rounded-lg border border-slate-300 bg-white p-3 font-mono text-xs shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 dark:border-slate-700 dark:bg-slate-900"></textarea>
+      </label>
+      <div class="space-y-4">
+        <label class="block">
+          <span class="text-sm font-medium">Server</span>
+          <select id="target"
+            class="mt-1 block w-full rounded-lg border border-slate-300 bg-white p-2 text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 dark:border-slate-700 dark:bg-slate-900">
+            <option value="">— keep original —</option>
+          </select>
+        </label>
+        <label id="custom-wrap" class="hidden">
+          <span class="text-sm font-medium">Custom address</span>
+          <input id="custom-target" type="text" spellcheck="false" autocomplete="off"
+            placeholder="host:port or https://host/"
+            class="mt-1 block w-full rounded-lg border border-slate-300 bg-white p-2 font-mono text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 dark:border-slate-700 dark:bg-slate-900">
+        </label>
+        <p id="target-hint" class="text-xs text-slate-500 dark:text-slate-400">Replaces host:port of every URI.</p>
+        <p id="count" class="text-sm text-slate-500 dark:text-slate-400">No URIs yet.</p>
+      </div>
+    </section>
+
+    <section class="overflow-x-auto rounded-lg border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
+      <table class="min-w-full divide-y divide-slate-200 text-sm dark:divide-slate-800">
+        <thead class="bg-slate-100 text-left text-xs font-semibold uppercase tracking-wide text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+          <tr>
+            <th class="px-3 py-2 w-10">#</th>
+            <th class="px-3 py-2 min-w-[12rem]">Label</th>
+            <th class="px-3 py-2 min-w-[16rem]">Server / URI</th>
+            <th class="px-3 py-2 w-56">QR</th>
+          </tr>
+        </thead>
+        <tbody id="rows" class="divide-y divide-slate-200 dark:divide-slate-800">
+          <tr id="empty-row">
+            <td colspan="4" class="px-3 py-10 text-center text-slate-400">Parsed URIs appear here as you type.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+  </main>
+
+  <div id="toast" role="status" aria-live="polite"
+    class="pointer-events-none fixed bottom-4 left-1/2 -translate-x-1/2 rounded-lg bg-slate-900 px-4 py-2 text-sm text-white opacity-0 shadow-lg transition-opacity dark:bg-slate-100 dark:text-slate-900"></div>
+</body>
+</html>

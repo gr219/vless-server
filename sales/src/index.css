@@ -1,0 +1,104 @@
+@import "tailwindcss";
+
+:root {
+  --background: #faf6ef;
+  --foreground: #211c16;
+  --card: #fffdf8;
+  --card-foreground: #211c16;
+  --primary: #b5421c;
+  --primary-foreground: #ffffff;
+  --secondary: #f3e3d6;
+  --secondary-foreground: #211c16;
+  --muted: #f1eadc;
+  --muted-foreground: #5c5347;
+  --accent: #f3e3d6;
+  --accent-foreground: #211c16;
+  --tag: #2f5d50;
+  --tag-foreground: #ffffff;
+  --destructive: #a32018;
+  --border: #e3dccf;
+  --input: #8a7f6e;
+  --ring: #b5421c;
+  --radius: 0.5rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --background: #1c1814;
+    --foreground: #f3ece0;
+    --card: #26211b;
+    --card-foreground: #f3ece0;
+    --primary: #e8895f;
+    --primary-foreground: #1c1814;
+    --secondary: #43291c;
+    --secondary-foreground: #f3ece0;
+    --muted: #2b251e;
+    --muted-foreground: #b8ad9c;
+    --accent: #43291c;
+    --accent-foreground: #f3ece0;
+    --tag: #8cc4b0;
+    --tag-foreground: #10201a;
+    --destructive: #ff9a8c;
+    --border: #3a332a;
+    --input: #7d725f;
+    --ring: #e8895f;
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --background: #1c1814;
+  --foreground: #f3ece0;
+  --card: #26211b;
+  --card-foreground: #f3ece0;
+  --primary: #e8895f;
+  --primary-foreground: #1c1814;
+  --secondary: #43291c;
+  --secondary-foreground: #f3ece0;
+  --muted: #2b251e;
+  --muted-foreground: #b8ad9c;
+  --accent: #43291c;
+  --accent-foreground: #f3ece0;
+  --tag: #8cc4b0;
+  --tag-foreground: #10201a;
+  --destructive: #ff9a8c;
+  --border: #3a332a;
+  --input: #7d725f;
+  --ring: #e8895f;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-tag: var(--tag);
+  --color-tag-foreground: var(--tag-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-xl: calc(var(--radius) + 4px);
+  --font-sans: "Be Vietnam Pro", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-serif: "Source Serif 4", Georgia, "Times New Roman", serif;
+}
+
+@layer base {
+  * { border-color: var(--border); }
+  html { scroll-behavior: smooth; }
+}
+
+/* Ngoài @layer để thắng mọi nền mặc định của trang chứa. */
+body { background: var(--background); color: var(--foreground); font-family: var(--font-sans); font-size: 16px; -webkit-font-smoothing: antialiased; }

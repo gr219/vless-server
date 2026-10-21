@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  # A broken script would only show up once the tunnel is live, so a failing
+  # test keeps the running tunnel in place instead of replacing it.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Syntax check setup-inbounds.py
+        run: python3 -m py_compile scripts/setup-inbounds.py
+      - name: Unit tests for the QR page server
+        run: python3 -m unittest discover -s tests
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Unit tests for the QR page
+        run: node --test tests/vless.test.js
+      - name: Build the sales page
+        working-directory: sales
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+  # The new run takes over from the running one itself (scripts/handover.py),
+  # so the running one is not cancelled here: that would leave a gap.
+  trigger-tunnel:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Tunnel 2 workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run tunnel2.yml -R ${{ github.repository }}
