@@ -75,14 +75,14 @@ test('parseVlessUri rejects input it cannot rewrite', () => {
 test('buildVlessUri with tls inserts TLS params right after encryption', () => {
   const uri = buildVlessUri(parseVlessUri(SAMPLE), { tls: true });
   assert.equal(uri, 'vless://2898f95d-52cb-43de-8603-d72b9c01bc88@azr2.std.io.vn:8444'
-    + '?encryption=none&security=tls&alpn=h3%2C%20h2&sni=azr2.std.io.vn'
+    + '?encryption=none&security=tls&alpn=h2&sni=azr2.std.io.vn'
     + '&extra=%7B%22mode%22%3A%22auto%22%7D&host=azr2.std.io.vn&mode=auto'
     + '&path=%2Fwarp&type=xhttp#VLESS-XHTTP-WARP-8444-TestWARP');
 });
 
 test('buildVlessUri with tls keeps the original host as SNI after a swap', () => {
   const uri = buildVlessUri(parseVlessUri(SAMPLE), { authority: TARGETS.vina0d.authority, tls: true });
-  assert.ok(uri.includes('@vina.std.io.vn:443?encryption=none&security=tls&alpn=h3%2C%20h2&sni=azr2.std.io.vn&'));
+  assert.ok(uri.includes('@vina.std.io.vn:443?encryption=none&security=tls&alpn=h2&sni=azr2.std.io.vn&'));
   assert.ok(uri.includes('&host=azr2.std.io.vn&'));
   assert.equal(uri.match(/[?&]security=/g).length, 1);
 });
@@ -90,9 +90,9 @@ test('buildVlessUri with tls keeps the original host as SNI after a swap', () =>
 test('buildVlessUri with tls replaces existing alpn/sni and handles a missing query', () => {
   const withOld = parseVlessUri('vless://id@a.example:443?type=ws&SNI=old&alpn=h2&encryption=none#x');
   assert.equal(buildVlessUri(withOld, { tls: true }),
-    'vless://id@a.example:443?type=ws&encryption=none&security=tls&alpn=h3%2C%20h2&sni=a.example#x');
+    'vless://id@a.example:443?type=ws&encryption=none&security=tls&alpn=h2&sni=a.example#x');
   assert.equal(buildVlessUri(parseVlessUri('vless://id@[2001:db8::1]:443'), { tls: true }),
-    'vless://id@[2001:db8::1]:443?security=tls&alpn=h3%2C%20h2&sni=2001%3Adb8%3A%3A1');
+    'vless://id@[2001:db8::1]:443?security=tls&alpn=h2&sni=2001%3Adb8%3A%3A1');
 });
 
 test('buildVlessUri never emits a parameter twice, keeping the first value', () => {
@@ -101,7 +101,7 @@ test('buildVlessUri never emits a parameter twice, keeping the first value', () 
   assert.equal(buildVlessUri(dup),
     'vless://id@a.example:443?type=xhttp&Path=%2Fa&encryption=none&security=none&sni=x&host=h#lbl');
   assert.equal(buildVlessUri(dup, { tls: true }),
-    'vless://id@a.example:443?type=xhttp&Path=%2Fa&encryption=none&security=tls&alpn=h3%2C%20h2'
+    'vless://id@a.example:443?type=xhttp&Path=%2Fa&encryption=none&security=tls&alpn=h2'
     + '&sni=a.example&host=h#lbl');
   for (const uri of [buildVlessUri(dup), buildVlessUri(dup, { tls: true })]) {
     const keys = uri.split('#')[0].split('?')[1].split('&').map((p) => p.split('=')[0].toLowerCase());

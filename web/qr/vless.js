@@ -130,7 +130,7 @@
    * repeated key (compared case-insensitively) only the first occurrence is
    * kept, the one URLSearchParams.get() would read. With an `sni`, any
    * security, alpn and sni parameters are dropped and
-   * `security=tls&alpn=h3%2C%20h2&sni=<sni>` is inserted right after
+   * `security=tls&alpn=h2&sni=<sni>` is inserted right after
    * encryption=, or at the end of the query when there is no encryption=.
    * Kept parameters keep their order and encoding.
    * @param {string} tail
@@ -151,7 +151,7 @@
       return true;
     });
     if (sni !== null) {
-      const tlsParams = ['security=tls', 'alpn=h3%2C%20h2', 'sni=' + encodeURIComponent(sni)];
+      const tlsParams = ['security=tls', 'alpn=h2', 'sni=' + encodeURIComponent(sni)];
       const encryptionAt = params.findIndex((pair) => keyOf(pair) === 'encryption');
       params.splice(encryptionAt === -1 ? params.length : encryptionAt + 1, 0, ...tlsParams);
     }
